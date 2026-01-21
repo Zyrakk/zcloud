@@ -56,6 +56,8 @@ Ejemplos:
 		kubectlCmd(),
 		applyCmd(),
 		execCmd(),
+		sshCmd(),
+		cpCmd(),
 		adminCmd(),
 		versionCmd(),
 	)
@@ -460,6 +462,128 @@ func adminCmd() *cobra.Command {
 	})
 
 	cmd.AddCommand(devicesCmd)
+
+	return cmd
+}
+
+// sshCmd - Conexión SSH interactiva
+func sshCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "ssh",
+		Short: "Abre una shell interactiva en el servidor",
+		Long: `Inicia una sesión SSH interactiva con el servidor ZCloud.
+
+La conexión se realiza a través de WebSocket con autenticación JWT.
+Soporta redimensionamiento de terminal.
+
+Ejemplo:
+  zcloud ssh`,
+		Run: func(cmd *cobra.Command, args []string) {
+			auth, err := client.NewAuth(cfg)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+
+			if err := auth.EnsureSession(); err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+
+			sshClient := client.SSHFromAuth(auth)
+			if err := sshClient.Connect(); err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+		},
+	}
+}
+
+// cpCmd - Transferencia de archivos
+func cpCmd() *cobra.Command {
+	var recursive bool
+
+	cmd := &cobra.Command{
+		Use:   "cp [origen] [destino]",
+		Short: "Copia archivos entre local y remoto",
+		Long: `Copia archivos entre tu máquina y el servidor.
+
+Usa el prefijo 'remote:' para indicar paths en el servidor.
+
+Ejemplos:
+  zcloud cp archivo.txt remote:/ruta/destino/
+  zcloud cp remote:/ruta/archivo.txt ./local/
+  zcloud cp -r ./carpeta/ remote:/destino/`,
+		Args: cobra.ExactArgs(2),
+		Run: func(cmd *cobra.Command, args []string) {
+			auth, err := client.NewAuth(cfg)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+
+			if err := auth.EnsureSession(); err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+
+			srcRemote, srcPath := client.ParseRemotePath(args[0])
+			dstRemote, dstPath := client.ParseRemotePath(args[1])
+
+			// Validar que origen y destino no sean ambos remotos o ambos locales
+			if srcRemote == dstRemote {
+				if srcRemote {
+					fmt.Fprintln(os.Stderr, "Error: copia remoto a remoto no soportada")
+				} else {
+					fmt.Fprintln(os.Stderr, "Error: usa 'cp' del sistema para copias locales")
+				}
+				os.Exit(1)
+			}
+
+			filesClient := client.NewFilesClient(cfg)
+
+			if srcRemote {
+				// Download: remote -> local
+				fmt.Printf("📥 Descargando %s -> %s\n", srcPath, dstPath)
+				if err := filesClient.Download(srcPath, dstPath); err != nil {
+					fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+					os.Exit(1)
+				}
+				fmt.Println("✅ Descarga completada")
+			} else {
+				// Upload: local -> remote
+				info, err := os.Stat(srcPath)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+					os.Exit(1)
+				}
+
+				if info.IsDir() {
+					if !recursive {
+						fmt.Fprintln(os.Stderr, "Error: usa -r para copiar directorios")
+						os.Exit(1)
+					}
+					fmt.Printf("📤 Subiendo directorio %s -> %s\n", srcPath, dstPath)
+					results, err := filesClient.UploadDir(srcPath, dstPath)
+					if err != nil {
+						fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+						os.Exit(1)
+					}
+					fmt.Printf("✅ %d archivos subidos\n", len(results))
+				} else {
+					fmt.Printf("📤 Subiendo %s -> %s\n", srcPath, dstPath)
+					result, err := filesClient.Upload(srcPath, dstPath)
+					if err != nil {
+						fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+						os.Exit(1)
+					}
+					fmt.Printf("✅ %s (%d bytes, SHA256: %s)\n", result.Path, result.Size, result.Checksum[:12])
+				}
+			}
+		},
+	}
+
+	cmd.Flags().BoolVarP(&recursive, "recursive", "r", false, "Copiar directorios recursivamente")
 
 	return cmd
 }

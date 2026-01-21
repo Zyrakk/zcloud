@@ -61,6 +61,15 @@ func (a *API) Router() http.Handler {
 	protected.HandleFunc("POST /api/v1/k8s/apply", a.handleApply)
 	protected.HandleFunc("POST /api/v1/ssh/exec", a.handleExec)
 
+	// SSH Shell (WebSocket)
+	protected.HandleFunc("GET /api/v1/ssh/shell", a.handleSSHShell)
+
+	// File transfer
+	protected.HandleFunc("POST /api/v1/files/upload", a.handleFileUpload)
+	protected.HandleFunc("GET /api/v1/files/download", a.handleFileDownload)
+	protected.HandleFunc("GET /api/v1/files/list", a.handleFileList)
+	protected.HandleFunc("DELETE /api/v1/files/delete", a.handleFileDelete)
+
 	// Rutas de admin
 	admin := http.NewServeMux()
 	admin.HandleFunc("GET /api/v1/admin/devices", a.handleListDevices)
@@ -73,6 +82,7 @@ func (a *API) Router() http.Handler {
 	mux.Handle("/api/v1/status/", a.auth.Authenticate(protected))
 	mux.Handle("/api/v1/k8s/", a.auth.Authenticate(protected))
 	mux.Handle("/api/v1/ssh/", a.auth.Authenticate(protected))
+	mux.Handle("/api/v1/files/", a.auth.Authenticate(protected))
 	mux.Handle("/api/v1/admin/", a.auth.Authenticate(a.auth.RequireAdmin(admin)))
 
 	// Health check

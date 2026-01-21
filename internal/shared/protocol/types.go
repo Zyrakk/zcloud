@@ -122,3 +122,68 @@ type ExecResponse struct {
 	Stderr   string `json:"stderr"`
 	ExitCode int    `json:"exit_code"`
 }
+
+// ================== SSH Protocol Types ==================
+
+// SSHMessageType tipos de mensajes WebSocket para SSH
+type SSHMessageType string
+
+const (
+	SSHMessageInput  SSHMessageType = "input"  // Input del usuario
+	SSHMessageOutput SSHMessageType = "output" // Output del shell
+	SSHMessageResize SSHMessageType = "resize" // Cambio de tamaño de terminal
+	SSHMessageError  SSHMessageType = "error"  // Error
+	SSHMessageClose  SSHMessageType = "close"  // Cerrar conexión
+)
+
+// SSHMessage mensaje genérico para comunicación WebSocket SSH
+type SSHMessage struct {
+	Type SSHMessageType `json:"type"`
+	Data []byte         `json:"data,omitempty"`
+	Rows uint16         `json:"rows,omitempty"`
+	Cols uint16         `json:"cols,omitempty"`
+}
+
+// ================== File Transfer Types ==================
+
+// FileUploadRequest - solicitud de subida de archivo
+type FileUploadRequest struct {
+	Path     string `json:"path"`
+	Mode     uint32 `json:"mode,omitempty"`     // Permisos del archivo
+	Checksum string `json:"checksum,omitempty"` // SHA256 opcional
+}
+
+// FileUploadResponse - respuesta de subida
+type FileUploadResponse struct {
+	Path     string `json:"path"`
+	Size     int64  `json:"size"`
+	Checksum string `json:"checksum"`
+	Message  string `json:"message,omitempty"`
+}
+
+// FileDownloadRequest - solicitud de descarga
+type FileDownloadRequest struct {
+	Path string `json:"path"`
+}
+
+// FileInfo - información de un archivo
+type FileInfo struct {
+	Name    string    `json:"name"`
+	Path    string    `json:"path"`
+	Size    int64     `json:"size"`
+	Mode    string    `json:"mode"`
+	ModTime time.Time `json:"mod_time"`
+	IsDir   bool      `json:"is_dir"`
+}
+
+// FileListRequest - solicitud para listar archivos
+type FileListRequest struct {
+	Path      string `json:"path"`
+	Recursive bool   `json:"recursive,omitempty"`
+}
+
+// FileListResponse - respuesta de listar archivos
+type FileListResponse struct {
+	Files []FileInfo `json:"files"`
+	Path  string     `json:"path"`
+}
