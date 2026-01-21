@@ -1,0 +1,29 @@
+[Unit]
+Description=ZCloud Server - Remote K3s Management
+Documentation=https://github.com/zyrak/zcloud
+After=network.target k3s.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+ExecStart=/opt/zcloud-server/zcloud-server --config /opt/zcloud-server/config.yaml
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=zcloud-server
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/zcloud-server/data
+PrivateTmp=true
+
+# Environment
+Environment=ZCLOUD_ENV=production
+
+[Install]
+WantedBy=multi-user.target

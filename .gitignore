@@ -1,0 +1,41 @@
+# Binaries
+dist/
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Test binary
+*.test
+
+# Output
+*.out
+
+# Go
+go.sum
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Local config
+configs/dev-config.yaml
+*.local.yaml
+
+# Secrets
+*.secret
+*.key
+*.pem
+
+# Database
+*.db
+*.sqlite
+
+# Logs
+*.log
