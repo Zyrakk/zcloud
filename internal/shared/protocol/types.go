@@ -187,3 +187,20 @@ type FileListResponse struct {
 	Files []FileInfo `json:"files"`
 	Path  string     `json:"path"`
 }
+
+// ================== Port Forward Types ==================
+
+// PortForwardMessageType tipos de mensajes WebSocket para port forwarding
+type PortForwardMessageType string
+
+const (
+	PortForwardData  PortForwardMessageType = "data"  // Datos TCP
+	PortForwardError PortForwardMessageType = "error" // Error
+	PortForwardClose PortForwardMessageType = "close" // Cerrar conexión
+)
+
+// PortForwardMessage mensaje para comunicación WebSocket de port forwarding
+type PortForwardMessage struct {
+	Type PortForwardMessageType `json:"type"`
+	Data []byte                 `json:"data,omitempty"`
+}

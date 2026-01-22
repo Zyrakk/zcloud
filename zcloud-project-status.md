@@ -128,12 +128,12 @@
 |---------------|-------------|--------|
 | SSH tunneling | `zcloud ssh` - Shell interactiva via WebSocket | ✅ |
 | Transferencia de archivos | `zcloud cp` - Upload/download de archivos | ✅ |
+| Port forwarding | `zcloud port-forward` - Túnel TCP a servicios | ✅ |
 
 ### ⏳ Pendiente
 
 | Funcionalidad | Descripción | Prioridad |
 |---------------|-------------|-----------|
-| Port forwarding | `zcloud port-forward` | Media |
 | DDNS automático | Actualización de IP en Cloudflare | Media |
 | Let's Encrypt auto | Renovación automática de certificados | Media |
 | Notificaciones Telegram | Alertas de nuevos dispositivos | Baja |
@@ -829,7 +829,7 @@ FASE 1 - Core Auth ✅ COMPLETADA
 FASE 2 - Conectividad ✅ COMPLETADA (Enero 2026)
 ├── ✅ SSH tunneling (zcloud ssh)
 ├── ✅ File transfer (zcloud cp)
-└── ⏳ Port forwarding (pendiente)
+└── ✅ Port forwarding (zcloud port-forward)
 
 FASE 3 - Operaciones (Próxima)
 ├── DDNS automático
@@ -914,10 +914,10 @@ ZCloud Fases 1 y 2 proporcionan una herramienta completa con:
 ### ✅ Fase 2 - Conectividad (Completada - Enero 2026)
 - SSH shell interactiva via WebSocket (`zcloud ssh`)
 - Transferencia de archivos bidireccional (`zcloud cp`)
+- Port forwarding a servicios (`zcloud port-forward`)
 
 ### ⏳ Próximos pasos
 Las fases siguientes añadirán:
-- Port forwarding para servicios del cluster
 - DDNS automático (Cloudflare)
 - Renovación automática de certificados Let's Encrypt
 - Notificaciones y métricas

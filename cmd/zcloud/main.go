@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strconv"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -57,6 +58,7 @@ Ejemplos:
 		applyCmd(),
 		execCmd(),
 		sshCmd(),
+		portForwardCmd(),
 		cpCmd(),
 		adminCmd(),
 		versionCmd(),
@@ -492,6 +494,64 @@ Ejemplo:
 
 			sshClient := client.SSHFromAuth(auth)
 			if err := sshClient.Connect(); err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+		},
+	}
+}
+
+// portForwardCmd - Port forwarding a servicios
+func portForwardCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "port-forward <host> <localPort>:<remotePort>",
+		Short: "Forward de puertos a servicios remotos",
+		Long: `Crea un túnel TCP desde un puerto local hacia un servicio remoto.
+
+El host puede ser:
+  - Un servicio k8s: grafana.monitoring.svc
+  - localhost para servicios en el servidor
+  - Cualquier host accesible desde el servidor
+
+Ejemplos:
+  zcloud port-forward grafana.monitoring.svc 3000:3000
+  zcloud port-forward localhost 8080:80
+  zcloud port-forward victoria.monitoring.svc 8428:8428`,
+		Args: cobra.ExactArgs(2),
+		Run: func(cmd *cobra.Command, args []string) {
+			auth, err := client.NewAuth(cfg)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+
+			if err := auth.EnsureSession(); err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+
+			// Parsear host y puertos
+			targetHost := args[0]
+			portParts := strings.Split(args[1], ":")
+			if len(portParts) != 2 {
+				fmt.Fprintln(os.Stderr, "Error: formato de puertos inválido, usa localPort:remotePort")
+				os.Exit(1)
+			}
+
+			localPort, err := strconv.Atoi(portParts[0])
+			if err != nil || localPort <= 0 || localPort > 65535 {
+				fmt.Fprintln(os.Stderr, "Error: puerto local inválido")
+				os.Exit(1)
+			}
+
+			remotePort, err := strconv.Atoi(portParts[1])
+			if err != nil || remotePort <= 0 || remotePort > 65535 {
+				fmt.Fprintln(os.Stderr, "Error: puerto remoto inválido")
+				os.Exit(1)
+			}
+
+			pfClient := client.PortForwardFromAuth(auth)
+			if err := pfClient.Forward(localPort, targetHost, remotePort); err != nil {
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				os.Exit(1)
 			}

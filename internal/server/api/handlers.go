@@ -70,6 +70,9 @@ func (a *API) Router() http.Handler {
 	protected.HandleFunc("GET /api/v1/files/list", a.handleFileList)
 	protected.HandleFunc("DELETE /api/v1/files/delete", a.handleFileDelete)
 
+	// Port forwarding (WebSocket)
+	protected.HandleFunc("GET /api/v1/portforward", a.handlePortForward)
+
 	// Rutas de admin
 	admin := http.NewServeMux()
 	admin.HandleFunc("GET /api/v1/admin/devices", a.handleListDevices)
@@ -83,6 +86,7 @@ func (a *API) Router() http.Handler {
 	mux.Handle("/api/v1/k8s/", a.auth.Authenticate(protected))
 	mux.Handle("/api/v1/ssh/", a.auth.Authenticate(protected))
 	mux.Handle("/api/v1/files/", a.auth.Authenticate(protected))
+	mux.Handle("/api/v1/portforward", a.auth.Authenticate(protected))
 	mux.Handle("/api/v1/admin/", a.auth.Authenticate(a.auth.RequireAdmin(admin)))
 
 	// Health check
