@@ -129,6 +129,7 @@
 | SSH tunneling | `zcloud ssh` - Shell interactiva via WebSocket | ✅ |
 | Transferencia de archivos | `zcloud cp` - Upload/download de archivos | ✅ |
 | Port forwarding | `zcloud port-forward` - Túnel TCP a servicios | ✅ |
+| Kubeconfig integration | `zcloud start/stop` - kubectl nativo + Powerlevel10k | ✅ |
 
 ### ⏳ Pendiente
 
@@ -156,15 +157,19 @@ zcloud/
 │   ├── client/                   # Lógica del cliente
 │   │   ├── auth.go              
 │   │   ├── config.go            
-│   │   ├── files.go             # [NUEVO] Transferencia de archivos
+│   │   ├── files.go             # Transferencia de archivos
 │   │   ├── http.go              
-│   │   └── ssh.go               # [NUEVO] Cliente SSH WebSocket
+│   │   ├── kubeconfig.go        # [NUEVO] Generación de kubeconfig
+│   │   ├── portforward.go       # Cliente port-forward WebSocket
+│   │   └── ssh.go               # Cliente SSH WebSocket
 │   │
 │   ├── server/                   # Lógica del servidor
 │   │   ├── api/
-│   │   │   ├── files.go         # [NUEVO] Handlers de archivos
+│   │   │   ├── files.go         # Handlers de archivos
 │   │   │   ├── handlers.go      
-│   │   │   └── ssh.go           # [NUEVO] Handler SSH con PTY
+│   │   │   ├── k8s_proxy.go     # [NUEVO] Proxy a API de Kubernetes
+│   │   │   ├── portforward.go   # Handler port-forward
+│   │   │   └── ssh.go           # Handler SSH con PTY
 │   │   ├── db/
 │   │   │   └── database.go      
 │   │   └── middleware/
@@ -210,12 +215,18 @@ zcloud/
 |---------|-------------|
 | `zcloud init <url>` | Configura el cliente por primera vez |
 | `zcloud init --complete` | Completa config después de aprobación |
-| `zcloud login` | Inicia sesión con TOTP |
+| `zcloud start` | Inicia sesión diaria con TOTP + genera kubeconfig |
+| `zcloud stop` | Cierra sesión y limpia kubeconfig |
+| `zcloud login` | Inicia sesión con TOTP (legacy) |
 | `zcloud logout` | Cierra sesión |
 | `zcloud status` | Muestra estado del cluster |
+| `zcloud status --check-only` | Verificación silenciosa (exit code) |
 | `zcloud k <args>` | Proxy a kubectl |
 | `zcloud apply <file>` | Aplica manifests YAML |
 | `zcloud exec <cmd>` | Ejecuta comando en servidor |
+| `zcloud ssh` | Shell interactiva |
+| `zcloud cp <src> <dst>` | Transferencia de archivos |
+| `zcloud port-forward <host> <ports>` | Túnel TCP |
 | `zcloud admin devices list` | Lista dispositivos |
 | `zcloud admin devices approve <id>` | Aprueba dispositivo |
 | `zcloud admin devices revoke <id>` | Revoca dispositivo |
@@ -707,27 +718,56 @@ zcloud cp -r ./carpeta/ remote:/destino/
 
 ---
 
-## Funcionalidades Pendientes
-
-### 🟡 Media Prioridad
-
-#### 3. Port Forwarding (`zcloud port-forward`)
+### ✅ Port Forwarding (`zcloud port-forward`) - COMPLETADO
 
 **Descripción:** Forward de puertos locales a servicios del cluster.
 
 ```bash
-zcloud port-forward grafana 3000:3000
+zcloud port-forward grafana.monitoring.svc 3000:3000
 # Acceder a http://localhost:3000
 ```
 
 **Implementación:**
-- WebSocket bidireccional para tunnel TCP
-- Listener local que conecta al WebSocket
-- Servidor proxy al servicio destino
+
+| Archivo | Descripción |
+|---------|-------------|
+| `internal/client/portforward.go` | Cliente WebSocket con listener TCP local |
+| `internal/server/api/portforward.go` | Handler WebSocket con proxy al servicio destino |
 
 ---
 
-#### 4. DDNS Automático
+### ✅ Kubeconfig Integration (`zcloud start/stop`) - COMPLETADO
+
+**Descripción:** Integración con kubeconfig estándar para kubectl nativo y Powerlevel10k.
+
+```bash
+zcloud start   # Login diario, genera ~/.zcloud/kubeconfig
+kubectl get pods  # Funciona directamente!
+zcloud stop    # Logout y limpia kubeconfig
+```
+
+**Implementación:**
+
+| Archivo | Descripción |
+|---------|-------------|
+| `internal/client/kubeconfig.go` | Generación de kubeconfig estándar |
+| `internal/client/config.go` | Campos `Trusted` y `ClusterConfig` |
+| `internal/server/api/k8s_proxy.go` | Proxy a API de Kubernetes |
+| `cmd/zcloud/main.go` | Comandos `start`, `stop`, `status --check-only` |
+
+**Características:**
+- Genera kubeconfig en `~/.zcloud/kubeconfig`
+- Compatible con Powerlevel10k (muestra `☸ zcloud-homelab`)
+- Sesión de 12h con JWT embebido en kubeconfig
+- Proxy transparente a API k3s via `/api/v1/k8s/proxy/`
+
+---
+
+## Funcionalidades Pendientes
+
+### 🟡 Media Prioridad
+
+#### 3. DDNS Automático
 
 **Descripción:** Actualizar IP pública en Cloudflare automáticamente.
 
