@@ -22,18 +22,18 @@ import (
 
 // API representa el servidor API
 type API struct {
-	db         *db.Database
-	auth       *middleware.AuthMiddleware
-	config     *Config
+	db     *db.Database
+	auth   *middleware.AuthMiddleware
+	config *Config
 }
 
 // Config configuración de la API
 type Config struct {
-	JWTSecret      string
-	SessionTTL     time.Duration
-	TOTPIssuer     string
+	JWTSecret       string
+	SessionTTL      time.Duration
+	TOTPIssuer      string
 	RequireApproval bool
-	KubeconfigPath string
+	KubeconfigPath  string
 }
 
 // New crea una nueva API
@@ -59,6 +59,7 @@ func (a *API) Router() http.Handler {
 	protected.HandleFunc("POST /api/v1/auth/logout", a.handleLogout)
 	protected.HandleFunc("GET /api/v1/status/cluster", a.handleClusterStatus)
 	protected.HandleFunc("POST /api/v1/k8s/apply", a.handleApply)
+	protected.HandleFunc("/api/v1/k8s/proxy/", a.handleK8sProxy)
 	protected.HandleFunc("POST /api/v1/ssh/exec", a.handleExec)
 
 	// SSH Shell (WebSocket)
@@ -306,7 +307,7 @@ func (a *API) handleLogin(w http.ResponseWriter, r *http.Request) {
 
 func (a *API) handleLogout(w http.ResponseWriter, r *http.Request) {
 	deviceID := middleware.GetDeviceID(r)
-	
+
 	// Eliminar sesiones del dispositivo
 	_ = a.db.DeleteDeviceSessions(deviceID)
 
@@ -373,7 +374,7 @@ func (a *API) handleClusterStatus(w http.ResponseWriter, r *http.Request) {
 	}
 
 	device, _ := a.db.GetDevice(deviceID)
-	
+
 	resp := &protocol.StatusResponse{
 		Connected:   true,
 		ClusterName: "zcloud-k3s",

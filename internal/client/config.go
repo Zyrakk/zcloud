@@ -14,13 +14,14 @@ type Config struct {
 	Server    ServerConfig  `yaml:"server"`
 	Device    DeviceConfig  `yaml:"device"`
 	Session   SessionConfig `yaml:"session"`
+	Cluster   ClusterConfig `yaml:"cluster"`
 	configDir string        `yaml:"-"`
 }
 
 // ServerConfig configuración del servidor
 type ServerConfig struct {
-	URL      string `yaml:"url"`       // https://api.zyrak.cloud
-	Insecure bool   `yaml:"insecure"`  // Para desarrollo (skip TLS verify)
+	URL      string `yaml:"url"`      // https://api.zyrak.cloud
+	Insecure bool   `yaml:"insecure"` // Para desarrollo (skip TLS verify)
 }
 
 // DeviceConfig configuración del dispositivo
@@ -28,12 +29,19 @@ type DeviceConfig struct {
 	ID       string `yaml:"id"`
 	Name     string `yaml:"name"`
 	Approved bool   `yaml:"approved"`
+	Trusted  bool   `yaml:"trusted"` // Dispositivo de confianza (TOTP configurado)
 }
 
 // SessionConfig configuración de la sesión actual
 type SessionConfig struct {
 	Token     string    `yaml:"token,omitempty"`
 	ExpiresAt time.Time `yaml:"expires_at,omitempty"`
+}
+
+// ClusterConfig configuración del cluster
+type ClusterConfig struct {
+	Name    string `yaml:"name"`    // Nombre para mostrar: "zcloud-homelab"
+	Context string `yaml:"context"` // Nombre del contexto: "zcloud"
 }
 
 // DefaultConfigDir devuelve el directorio de configuración por defecto
@@ -52,7 +60,7 @@ func LoadConfig(dir string) (*Config, error) {
 	}
 
 	configPath := filepath.Join(dir, "config.yaml")
-	
+
 	data, err := os.ReadFile(configPath)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -131,4 +139,17 @@ func (c *Config) ClearSession() {
 func (c *Config) SetSession(token string, expiresAt time.Time) {
 	c.Session.Token = token
 	c.Session.ExpiresAt = expiresAt
+}
+
+// IsSessionValid verifica si la sesión actual es válida (alias de HasValidSession)
+func (c *Config) IsSessionValid() bool {
+	return c.HasValidSession()
+}
+
+// SessionExpiresIn devuelve cuánto tiempo queda de sesión
+func (c *Config) SessionExpiresIn() time.Duration {
+	if !c.IsSessionValid() {
+		return 0
+	}
+	return time.Until(c.Session.ExpiresAt)
 }

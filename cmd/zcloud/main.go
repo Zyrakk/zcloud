@@ -6,6 +6,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -54,6 +55,8 @@ Ejemplos:
 		loginCmd(),
 		logoutCmd(),
 		statusCmd(),
+		startCmd(),
+		stopCmd(),
 		kubectlCmd(),
 		applyCmd(),
 		execCmd(),
@@ -165,10 +168,21 @@ func logoutCmd() *cobra.Command {
 
 // statusCmd - Comando de status
 func statusCmd() *cobra.Command {
-	return &cobra.Command{
+	var checkOnly bool
+
+	cmd := &cobra.Command{
 		Use:   "status",
 		Short: "Muestra el estado del cluster y la sesión",
 		Run: func(cmd *cobra.Command, args []string) {
+			if checkOnly {
+				// Modo silencioso - solo exit code
+				if cfg.IsSessionValid() {
+					os.Exit(0)
+				} else {
+					os.Exit(1)
+				}
+			}
+
 			auth, err := client.NewAuth(cfg)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
@@ -181,6 +195,139 @@ func statusCmd() *cobra.Command {
 			}
 		},
 	}
+
+	cmd.Flags().BoolVar(&checkOnly, "check-only", false, "Solo verificar sesión, sin output (exit code 0=válida, 1=inválida)")
+	return cmd
+}
+
+// startCmd - Comando de inicio de sesión diaria
+func startCmd() *cobra.Command {
+	var force bool
+
+	cmd := &cobra.Command{
+		Use:   "start",
+		Short: "Inicia sesión diaria con TOTP",
+		Long: `Autentica con código TOTP y genera token de sesión.
+
+El token es válido por 12 horas. Después de ejecutar este comando,
+puedes usar 'kubectl' directamente con el kubeconfig generado.
+
+Ejemplo:
+  zcloud start`,
+		Run: func(cmd *cobra.Command, args []string) {
+			// Verificar que el dispositivo está configurado
+			if !cfg.IsInitialized() {
+				fmt.Fprintln(os.Stderr, "❌ Dispositivo no configurado")
+				fmt.Fprintln(os.Stderr, "   Ejecuta: zcloud init <server_url>")
+				os.Exit(1)
+			}
+
+			if !cfg.IsApproved() {
+				fmt.Fprintln(os.Stderr, "❌ Dispositivo no aprobado")
+				fmt.Fprintln(os.Stderr, "   Ejecuta: zcloud init --complete")
+				os.Exit(1)
+			}
+
+			// Verificar si ya hay sesión válida
+			if cfg.IsSessionValid() && !force {
+				expires := cfg.SessionExpiresIn()
+				fmt.Printf("✅ Ya tienes una sesión activa\n")
+				fmt.Printf("   ☸ Cluster: %s\n", getClusterName(cfg))
+				fmt.Printf("   ⏰ Expira en: %s\n", formatDuration(expires))
+				fmt.Println()
+				fmt.Println("💡 Usa 'zcloud start --force' para renovar")
+				return
+			}
+
+			auth, err := client.NewAuth(cfg)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+
+			// Mostrar info del dispositivo
+			fmt.Println()
+			fmt.Println("🔐 ZCloud - Inicio de sesión")
+			fmt.Printf("   Dispositivo: %s (%s)\n", cfg.Device.Name, cfg.Device.ID[:8])
+			fmt.Println()
+
+			// Hacer login (pide TOTP internamente)
+			if err := auth.Login(); err != nil {
+				fmt.Fprintf(os.Stderr, "\n❌ Error: %v\n", err)
+				os.Exit(1)
+			}
+
+			// Generar kubeconfig con el nuevo token
+			if err := cfg.GenerateKubeconfig(cfg.Session.Token); err != nil {
+				fmt.Fprintf(os.Stderr, "Error generando kubeconfig: %v\n", err)
+				os.Exit(1)
+			}
+
+			// Marcar como trusted si no lo estaba
+			if !cfg.Device.Trusted {
+				cfg.Device.Trusted = true
+				_ = cfg.Save()
+			}
+
+			// Mostrar resultado
+			fmt.Println()
+			fmt.Println("✅ Sesión iniciada")
+			fmt.Printf("   ☸ Cluster: %s\n", getClusterName(cfg))
+			fmt.Printf("   ⏰ Válida hasta: %s (%s)\n",
+				cfg.Session.ExpiresAt.Format("15:04"),
+				formatDuration(cfg.SessionExpiresIn()))
+			fmt.Println()
+			fmt.Printf("💡 Kubeconfig: %s\n", cfg.KubeconfigPath())
+			fmt.Println("💡 Ahora puedes usar 'kubectl' directamente")
+		},
+	}
+
+	cmd.Flags().BoolVar(&force, "force", false, "Forzar nueva sesión aunque ya exista una válida")
+	return cmd
+}
+
+// stopCmd - Comando de cierre de sesión
+func stopCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "stop",
+		Short: "Cierra la sesión actual y limpia kubeconfig",
+		Run: func(cmd *cobra.Command, args []string) {
+			auth, err := client.NewAuth(cfg)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+
+			// Logout en servidor
+			_ = auth.Logout()
+
+			// Limpiar kubeconfig
+			_ = cfg.ClearKubeconfig()
+
+			fmt.Println("👋 Sesión cerrada")
+			fmt.Println("   Token invalidado en servidor")
+			fmt.Println("   Kubeconfig limpiado")
+		},
+	}
+}
+
+// formatDuration formatea una duración legible
+func formatDuration(d time.Duration) string {
+	hours := int(d.Hours())
+	minutes := int(d.Minutes()) % 60
+
+	if hours > 0 {
+		return fmt.Sprintf("%dh %dm", hours, minutes)
+	}
+	return fmt.Sprintf("%dm", minutes)
+}
+
+// getClusterName obtiene el nombre del cluster
+func getClusterName(cfg *client.Config) string {
+	if cfg.Cluster.Name != "" {
+		return cfg.Cluster.Name
+	}
+	return "zcloud-homelab"
 }
 
 // kubectlCmd - Proxy a kubectl

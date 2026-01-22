@@ -75,28 +75,37 @@ zcloud admin devices approve <device_id>
 # 3. Completar configuración (configurar TOTP)
 zcloud init --complete
 
-# 4. Login
-zcloud login
+# 4. Configurar shell (añadir a ~/.zshrc o ~/.bashrc)
+echo 'export KUBECONFIG="$HOME/.zcloud/kubeconfig:$KUBECONFIG"' >> ~/.zshrc
+source ~/.zshrc
 ```
 
-### Comandos diarios
+### Uso diario
 
 ```bash
-# Estado del cluster
-zcloud status
+# Iniciar sesión (una vez al día, pide TOTP)
+zcloud start
 
-# Comandos kubectl
+# Ahora puedes usar kubectl directamente!
+kubectl get pods -A
+kubectl get nodes
+kubectl describe pod <pod>
+
+# También funciona el proxy interno
 zcloud k get pods -A
-zcloud k get nodes
-zcloud k describe pod <pod>
+
+# Estado del cluster y sesión
+zcloud status
 
 # Aplicar manifests
 zcloud apply ./deployment.yaml
 zcloud apply ./k8s/
 
-# Ejecutar comandos
-zcloud exec kubectl get nodes
+# Cerrar sesión (opcional)
+zcloud stop
 ```
+
+> 💡 **Powerlevel10k**: Después de `zcloud start`, tu prompt mostrará `☸ zcloud-homelab`
 
 ### Administración
 
@@ -120,7 +129,7 @@ zcloud admin devices revoke <device_id>
 ├── config.yaml      # Configuración del cliente
 ├── device.key       # Clave privada (Ed25519)
 ├── device.pub       # Clave pública
-└── session.token    # JWT de sesión activa
+└── kubeconfig       # Kubeconfig para kubectl/Powerlevel10k
 ```
 
 ### Servidor (`/opt/zcloud-server/`)
@@ -197,6 +206,7 @@ make dev-client
 | `/api/v1/auth/logout` | POST | Cerrar sesión |
 | `/api/v1/status/cluster` | GET | Estado del cluster |
 | `/api/v1/k8s/apply` | POST | Aplicar manifests |
+| `/api/v1/k8s/proxy/*` | ALL | Proxy a API de Kubernetes |
 | `/api/v1/ssh/exec` | POST | Ejecutar comando |
 | `/api/v1/admin/devices` | GET | Listar dispositivos |
 | `/api/v1/admin/devices/:id/approve` | POST | Aprobar dispositivo |
