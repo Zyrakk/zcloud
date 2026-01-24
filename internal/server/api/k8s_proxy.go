@@ -2,16 +2,35 @@ package api
 
 import (
 	"crypto/tls"
+	"encoding/base64"
 	"io"
 	"net/http"
 	"os"
 	"strings"
+
+	"gopkg.in/yaml.v3"
 )
+
+// kubeconfig structures for parsing k3s.yaml
+type kubeconfigFile struct {
+	Clusters []struct {
+		Cluster struct {
+			Server                   string `yaml:"server"`
+			CertificateAuthorityData string `yaml:"certificate-authority-data"`
+		} `yaml:"cluster"`
+	} `yaml:"clusters"`
+	Users []struct {
+		User struct {
+			ClientCertificateData string `yaml:"client-certificate-data"`
+			ClientKeyData         string `yaml:"client-key-data"`
+			Token                 string `yaml:"token"`
+		} `yaml:"user"`
+	} `yaml:"users"`
+}
 
 // handleK8sProxy proxies requests to the local Kubernetes API
 func (a *API) handleK8sProxy(w http.ResponseWriter, r *http.Request) {
 	// Extract the path after /api/v1/k8s/proxy/
-	// Example: /api/v1/k8s/proxy/api/v1/pods → /api/v1/pods
 	k8sPath := strings.TrimPrefix(r.URL.Path, "/api/v1/k8s/proxy")
 	if k8sPath == "" {
 		k8sPath = "/"
@@ -38,7 +57,7 @@ func (a *API) handleK8sProxy(w http.ResponseWriter, r *http.Request) {
 			key == "Transfer-Encoding" || key == "Upgrade" {
 			continue
 		}
-		// Skip Authorization - we'll use k8s service account token instead
+		// Skip Authorization - we'll use k8s credentials
 		if key == "Authorization" {
 			continue
 		}
@@ -47,24 +66,11 @@ func (a *API) handleK8sProxy(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Use k3s credentials for authentication
-	// First try the kubeconfig (typical for systemd service)
-	k8sToken, err := getKubeconfigToken(a.config.KubeconfigPath)
+	// Get k8s client from kubeconfig
+	client, err := a.getK8sClient()
 	if err != nil {
-		// Fallback to in-cluster service account token (if running in pod)
-		k8sToken, err = os.ReadFile("/var/run/secrets/kubernetes.io/serviceaccount/token")
-		if err != nil {
-			http.Error(w, "failed to get k8s credentials: "+err.Error(), http.StatusInternalServerError)
-			return
-		}
-	}
-	proxyReq.Header.Set("Authorization", "Bearer "+string(k8sToken))
-
-	// Create HTTP client with TLS skip verify (for self-signed k3s certs)
-	client := &http.Client{
-		Transport: &http.Transport{
-			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
-		},
+		http.Error(w, "failed to get k8s credentials: "+err.Error(), http.StatusInternalServerError)
+		return
 	}
 
 	// Execute the request
@@ -89,27 +95,46 @@ func (a *API) handleK8sProxy(w http.ResponseWriter, r *http.Request) {
 	io.Copy(w, resp.Body)
 }
 
-// getKubeconfigToken extracts the token from a kubeconfig file
-func getKubeconfigToken(kubeconfigPath string) ([]byte, error) {
-	// For server-side, we typically use a dedicated service account or admin config
-	// This is a fallback when not running in-cluster
-	data, err := os.ReadFile(kubeconfigPath)
+// getK8sClient creates an HTTP client with k3s credentials from kubeconfig
+func (a *API) getK8sClient() (*http.Client, error) {
+	// Read and parse kubeconfig
+	data, err := os.ReadFile(a.config.KubeconfigPath)
 	if err != nil {
 		return nil, err
 	}
 
-	// Simple token extraction - look for "token:" in the file
-	// In production, you'd want proper YAML parsing
-	lines := strings.Split(string(data), "\n")
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if strings.HasPrefix(line, "token:") {
-			token := strings.TrimPrefix(line, "token:")
-			token = strings.TrimSpace(token)
-			token = strings.Trim(token, "\"'")
-			return []byte(token), nil
-		}
+	var kc kubeconfigFile
+	if err := yaml.Unmarshal(data, &kc); err != nil {
+		return nil, err
 	}
 
-	return nil, os.ErrNotExist
+	// Create TLS config
+	tlsConfig := &tls.Config{
+		InsecureSkipVerify: true, // k3s uses self-signed certs
+	}
+
+	// Check if we have client certificate auth
+	if len(kc.Users) > 0 && kc.Users[0].User.ClientCertificateData != "" {
+		certData, err := base64.StdEncoding.DecodeString(kc.Users[0].User.ClientCertificateData)
+		if err != nil {
+			return nil, err
+		}
+		keyData, err := base64.StdEncoding.DecodeString(kc.Users[0].User.ClientKeyData)
+		if err != nil {
+			return nil, err
+		}
+
+		cert, err := tls.X509KeyPair(certData, keyData)
+		if err != nil {
+			return nil, err
+		}
+		tlsConfig.Certificates = []tls.Certificate{cert}
+	}
+
+	return &http.Client{
+		Transport: &http.Transport{
+			TLSClientConfig: tlsConfig,
+		},
+	}, nil
 }
+
