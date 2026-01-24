@@ -81,9 +81,11 @@
 1. Cliente genera par de claves Ed25519
 2. Cliente envía clave pública al servidor
 3. Servidor crea registro con estado "pending"
-4. Admin aprueba dispositivo
+4. Admin aprueba dispositivo desde el SERVIDOR: zcloud-server admin devices approve <id>
 5. Servidor genera secreto TOTP
-6. Cliente configura app autenticador (Google Authenticator, etc.)
+6. Cliente verifica aprobación: zcloud init --complete
+7. Cliente configura TOTP: zcloud totp
+8. Cliente configura app autenticador (Google Authenticator, Authy, etc.)
 
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │                              LOGIN DIARIO                                    │
@@ -221,10 +223,11 @@ zcloud/
 | Comando | Descripción |
 |---------|-------------|
 | `zcloud init <url>` | Configura el cliente por primera vez |
-| `zcloud init --complete` | Completa config después de aprobación |
+| `zcloud init --complete` | Verifica aprobación después de que admin apruebe |
+| `zcloud totp` | Configura TOTP para el dispositivo |
 | `zcloud start` | Inicia sesión diaria con TOTP + genera kubeconfig |
 | `zcloud stop` | Cierra sesión y limpia kubeconfig |
-| `zcloud login` | Inicia sesión con TOTP (legacy) |
+| `zcloud login` | Inicia sesión con TOTP |
 | `zcloud logout` | Cierra sesión |
 | `zcloud status` | Muestra estado del cluster |
 | `zcloud status --check-only` | Verificación silenciosa (exit code) |
@@ -234,9 +237,9 @@ zcloud/
 | `zcloud ssh` | Shell interactiva |
 | `zcloud cp <src> <dst>` | Transferencia de archivos |
 | `zcloud port-forward <host> <ports>` | Túnel TCP |
-| `zcloud admin devices list` | Lista dispositivos |
-| `zcloud admin devices approve <id>` | Aprueba dispositivo |
-| `zcloud admin devices revoke <id>` | Revoca dispositivo |
+| `zcloud admin devices list` | Lista dispositivos (requiere sesión admin) |
+| `zcloud admin devices approve <id>` | Aprueba dispositivo (requiere sesión admin) |
+| `zcloud admin devices revoke <id>` | Revoca dispositivo (requiere sesión admin) |
 
 ---
 
@@ -251,6 +254,17 @@ zcloud/
 - Servidor HTTP con graceful shutdown
 - Limpieza periódica de sesiones expiradas
 - Modo `--init` para primera configuración
+- **Comandos admin CLI directos (sin API)**
+
+**Comandos CLI admin:**
+
+| Comando | Descripción |
+|---------|-------------|
+| `zcloud-server admin devices list` | Lista dispositivos registrados |
+| `zcloud-server admin devices approve <id>` | Aprueba un dispositivo pendiente |
+| `zcloud-server admin devices revoke <id>` | Revoca un dispositivo |
+
+> 💡 Estos comandos operan directamente sobre la base de datos y no requieren sesión activa. Ideales para el primer dispositivo (problema del huevo y la gallina).
 
 **Configuración soportada:**
 
@@ -288,7 +302,8 @@ storage:
 | Función | Descripción |
 |---------|-------------|
 | `Init(serverURL)` | Genera claves, registra dispositivo |
-| `CompleteInit()` | Configura TOTP después de aprobación |
+| `CompleteInit()` | Verifica aprobación y marca dispositivo como aprobado |
+| `SetupTOTP()` | Configura TOTP para dispositivo aprobado |
 | `Login()` | Firma timestamp, envía TOTP, obtiene JWT |
 | `Logout()` | Invalida sesión local y remota |
 | `Status()` | Muestra estado de sesión y cluster |

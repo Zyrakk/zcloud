@@ -54,6 +54,7 @@ Ejemplos:
 		initCmd(),
 		loginCmd(),
 		logoutCmd(),
+		totpCmd(),
 		statusCmd(),
 		startCmd(),
 		stopCmd(),
@@ -159,6 +160,32 @@ func logoutCmd() *cobra.Command {
 			}
 
 			if err := auth.Logout(); err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+		},
+	}
+}
+
+// totpCmd - Comando de configuración TOTP
+func totpCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "totp",
+		Short: "Configura TOTP para el dispositivo",
+		Long: `Configura la autenticación TOTP para un dispositivo aprobado.
+Debe ejecutarse después de que el administrador apruebe el dispositivo
+y antes del primer login.
+
+Ejemplo:
+  zcloud totp`,
+		Run: func(cmd *cobra.Command, args []string) {
+			auth, err := client.NewAuth(cfg)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+
+			if err := auth.SetupTOTP(); err != nil {
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				os.Exit(1)
 			}

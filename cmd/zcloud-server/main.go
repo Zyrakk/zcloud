@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -17,6 +18,7 @@ import (
 	"github.com/zyrak/zcloud/internal/server/api"
 	"github.com/zyrak/zcloud/internal/server/db"
 	"github.com/zyrak/zcloud/internal/shared/crypto"
+	"github.com/zyrak/zcloud/internal/shared/protocol"
 )
 
 // ServerConfig configuración del servidor desde YAML
@@ -50,6 +52,12 @@ type ServerConfig struct {
 }
 
 func main() {
+	// Check for admin subcommand first (before flag parsing)
+	if len(os.Args) > 1 && os.Args[1] == "admin" {
+		runAdminCommand()
+		return
+	}
+
 	configPath := flag.String("config", "/opt/zcloud-server/config.yaml", "Path to config file")
 	initMode := flag.Bool("init", false, "Initialize server configuration")
 	flag.Parse()
@@ -302,3 +310,199 @@ storage:
 
 	return nil
 }
+
+// runAdminCommand handles direct database administration commands
+func runAdminCommand() {
+	// Usage: zcloud-server admin devices <list|approve|revoke> [device_id] [--config path]
+	if len(os.Args) < 3 {
+		printAdminUsage()
+		os.Exit(1)
+	}
+
+	// Parse config flag from remaining args
+	configPath := "/opt/zcloud-server/config.yaml"
+	for i, arg := range os.Args {
+		if arg == "--config" && i+1 < len(os.Args) {
+			configPath = os.Args[i+1]
+			break
+		}
+	}
+
+	// Load config to get database path
+	config, err := loadConfig(configPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error loading config: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Connect to database
+	database, err := db.New(config.Storage.Database)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error connecting to database: %v\n", err)
+		os.Exit(1)
+	}
+	defer database.Close()
+
+	subcommand := os.Args[2]
+	if subcommand != "devices" {
+		fmt.Fprintf(os.Stderr, "Unknown admin subcommand: %s\n", subcommand)
+		printAdminUsage()
+		os.Exit(1)
+	}
+
+	if len(os.Args) < 4 {
+		printAdminUsage()
+		os.Exit(1)
+	}
+
+	action := os.Args[3]
+
+	switch action {
+	case "list":
+		adminListDevices(database)
+	case "approve":
+		if len(os.Args) < 5 {
+			fmt.Fprintln(os.Stderr, "Error: device_id required")
+			fmt.Fprintln(os.Stderr, "Usage: zcloud-server admin devices approve <device_id>")
+			os.Exit(1)
+		}
+		adminApproveDevice(database, os.Args[4], config)
+	case "revoke":
+		if len(os.Args) < 5 {
+			fmt.Fprintln(os.Stderr, "Error: device_id required")
+			fmt.Fprintln(os.Stderr, "Usage: zcloud-server admin devices revoke <device_id>")
+			os.Exit(1)
+		}
+		adminRevokeDevice(database, os.Args[4])
+	default:
+		fmt.Fprintf(os.Stderr, "Unknown action: %s\n", action)
+		printAdminUsage()
+		os.Exit(1)
+	}
+}
+
+func printAdminUsage() {
+	fmt.Println("Usage: zcloud-server admin devices <command> [device_id] [--config path]")
+	fmt.Println()
+	fmt.Println("Commands:")
+	fmt.Println("  list              List all registered devices")
+	fmt.Println("  approve <id>      Approve a pending device")
+	fmt.Println("  revoke <id>       Revoke a device")
+	fmt.Println()
+	fmt.Println("Options:")
+	fmt.Println("  --config path     Path to config file (default: /opt/zcloud-server/config.yaml)")
+}
+
+func adminListDevices(database *db.Database) {
+	devices, err := database.ListDevices()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error listing devices: %v\n", err)
+		os.Exit(1)
+	}
+
+	if len(devices) == 0 {
+		fmt.Println("No devices registered")
+		return
+	}
+
+	fmt.Println()
+	fmt.Printf("%-14s %-15s %-10s %-20s\n", "ID", "NAME", "STATUS", "CREATED")
+	fmt.Println(strings.Repeat("-", 65))
+
+	for _, d := range devices {
+		fmt.Printf("%-14s %-15s %-10s %-20s\n",
+			d.ID[:12],
+			truncate(d.Name, 15),
+			d.Status,
+			d.CreatedAt.Format("2006-01-02 15:04"))
+	}
+	fmt.Println()
+}
+
+func adminApproveDevice(database *db.Database, deviceID string, config *ServerConfig) {
+	// Find device (support partial ID)
+	device, err := findDevice(database, deviceID)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+
+	if device.Status == protocol.DeviceStatusApproved {
+		fmt.Printf("Device %s is already approved\n", device.ID[:12])
+		return
+	}
+
+	// Update status to approved
+	if err := database.UpdateDeviceStatus(device.ID, protocol.DeviceStatusApproved); err != nil {
+		fmt.Fprintf(os.Stderr, "Error approving device: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Generate TOTP secret
+	totpSecret, _, err := crypto.GenerateTOTP(crypto.TOTPConfig{
+		Issuer:      config.Auth.TOTPIssuer,
+		AccountName: device.Name,
+	})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error generating TOTP: %v\n", err)
+		os.Exit(1)
+	}
+
+	if err := database.UpdateDeviceTOTP(device.ID, totpSecret); err != nil {
+		fmt.Fprintf(os.Stderr, "Error saving TOTP: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Printf("✅ Device approved: %s (%s)\n", device.Name, device.ID[:12])
+	fmt.Println()
+	fmt.Println("The client must now run: zcloud totp")
+}
+
+func adminRevokeDevice(database *db.Database, deviceID string) {
+	device, err := findDevice(database, deviceID)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+
+	if err := database.UpdateDeviceStatus(device.ID, protocol.DeviceStatusRevoked); err != nil {
+		fmt.Fprintf(os.Stderr, "Error revoking device: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Delete active sessions
+	_ = database.DeleteDeviceSessions(device.ID)
+
+	fmt.Printf("✅ Device revoked: %s (%s)\n", device.Name, device.ID[:12])
+}
+
+func findDevice(database *db.Database, partialID string) (*protocol.DeviceInfo, error) {
+	devices, err := database.ListDevices()
+	if err != nil {
+		return nil, fmt.Errorf("failed to list devices: %w", err)
+	}
+
+	var matches []protocol.DeviceInfo
+	for _, d := range devices {
+		if strings.HasPrefix(d.ID, partialID) {
+			matches = append(matches, d)
+		}
+	}
+
+	if len(matches) == 0 {
+		return nil, fmt.Errorf("device not found: %s", partialID)
+	}
+	if len(matches) > 1 {
+		return nil, fmt.Errorf("ambiguous device ID: %s (matches %d devices)", partialID, len(matches))
+	}
+
+	return &matches[0], nil
+}
+
+func truncate(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen-1] + "…"
+}
+

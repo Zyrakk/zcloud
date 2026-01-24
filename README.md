@@ -69,13 +69,16 @@ sudo make install-client
 # 1. Inicializar cliente
 zcloud init https://api.zyrak.cloud
 
-# 2. Esperar aprobación del admin (en el servidor)
-zcloud admin devices approve <device_id>
+# 2. En el SERVIDOR, aprobar el dispositivo
+zcloud-server admin devices approve <device_id>
 
-# 3. Completar configuración (configurar TOTP)
+# 3. En el cliente, verificar aprobación
 zcloud init --complete
 
-# 4. Configurar shell (añadir a ~/.zshrc o ~/.bashrc)
+# 4. Configurar TOTP
+zcloud totp
+
+# 5. Configurar shell (añadir a ~/.zshrc o ~/.bashrc)
 echo 'export KUBECONFIG="$HOME/.zcloud/kubeconfig:$KUBECONFIG"' >> ~/.zshrc
 source ~/.zshrc
 ```
@@ -146,26 +149,30 @@ sudo systemctl status zcloud-server  # Verificar que arranca bien
 
 ### 🔑 Primera autorización de dispositivo
 
-Cuando inicias el servidor por primera vez en un nuevo dispositivo, necesitas aprobar el primer dispositivo (el admin) manualmente. Este paso solo es necesario **una vez**:
+Cuando inicias el servidor por primera vez, necesitas aprobar el primer dispositivo manualmente:
 
 ```bash
 # 1. En el cliente, inicializa y obtén el device_id
 zcloud init https://api.zyrak.cloud
 # Anota el Device ID que te muestra
 
-# 2. En el servidor, aprueba y marca como admin
-sqlite3 /opt/zcloud-server/data/zcloud.db \
-  "UPDATE devices SET status='approved', is_admin=1 WHERE id='TU_DEVICE_ID'"
+# 2. En el servidor, aprobar el dispositivo y marcarlo como admin
+zcloud-server admin devices approve <device_id>
+# Para el primer dispositivo, también debes marcarlo como admin:
+sqlite3 /opt/zcloud-server/data/zcloud.db "UPDATE devices SET is_admin=1 WHERE id='<device_id>'"
 
-# 3. En el cliente, completa la configuración
+# 3. En el cliente, verificar aprobación
 zcloud init --complete
 
-# 4. Ya puedes usar zcloud normalmente
+# 4. Configurar TOTP
+zcloud totp
+
+# 5. Ya puedes usar zcloud normalmente
 zcloud login
 zcloud status
 ```
 
-> 💡 **Después de esta configuración inicial**, podrás aprobar nuevos dispositivos con `zcloud admin devices approve <id>` sin necesidad de tocar la base de datos.
+> 💡 **Después de esta configuración inicial**, podrás aprobar nuevos dispositivos directamente en el servidor con `zcloud-server admin devices approve <id>`.
 
 ## 📁 Estructura de archivos
 
