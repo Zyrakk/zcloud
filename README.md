@@ -120,6 +120,53 @@ zcloud admin devices approve <device_id>
 zcloud admin devices revoke <device_id>
 ```
 
+### 🔄 Actualización del binario
+
+Cuando hay nuevas versiones disponibles, sigue estos pasos para actualizar:
+
+**Cliente (cualquier Linux):**
+```bash
+cd ~/Git_Repos/zcloud  # O donde tengas el repositorio
+git pull
+make build-client
+sudo cp dist/zcloud-linux-amd64 /usr/local/bin/zcloud
+zcloud status  # Verificar que funciona
+```
+
+**Servidor (N150):**
+```bash
+cd ~/Git_Repos/zcloud
+git pull
+make build-server
+sudo systemctl stop zcloud-server
+sudo cp dist/zcloud-server-linux-amd64 /opt/zcloud-server/zcloud-server
+sudo systemctl start zcloud-server
+sudo systemctl status zcloud-server  # Verificar que arranca bien
+```
+
+### 🔑 Primera autorización de dispositivo
+
+Cuando inicias el servidor por primera vez en un nuevo dispositivo, necesitas aprobar el primer dispositivo (el admin) manualmente. Este paso solo es necesario **una vez**:
+
+```bash
+# 1. En el cliente, inicializa y obtén el device_id
+zcloud init https://api.zyrak.cloud
+# Anota el Device ID que te muestra
+
+# 2. En el servidor, aprueba y marca como admin
+sqlite3 /opt/zcloud-server/data/zcloud.db \
+  "UPDATE devices SET status='approved', is_admin=1 WHERE id='TU_DEVICE_ID'"
+
+# 3. En el cliente, completa la configuración
+zcloud init --complete
+
+# 4. Ya puedes usar zcloud normalmente
+zcloud login
+zcloud status
+```
+
+> 💡 **Después de esta configuración inicial**, podrás aprobar nuevos dispositivos con `zcloud admin devices approve <id>` sin necesidad de tocar la base de datos.
+
 ## 📁 Estructura de archivos
 
 ### Cliente (`~/.zcloud/`)

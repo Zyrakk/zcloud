@@ -216,12 +216,11 @@ func (a *API) handleDeviceStatus(w http.ResponseWriter, r *http.Request) {
 		totpSecret, err := a.db.GetTOTPSecret(deviceID)
 		if err == nil && totpSecret != "" {
 			resp.TOTPSecret = totpSecret
-			// Generar QR
-			_, qr, _ := crypto.GenerateTOTP(crypto.TOTPConfig{
+			// Generar QR del secreto existente (no regenerar secreto)
+			resp.TOTPQR, _ = crypto.GenerateTOTPQRFromSecret(totpSecret, crypto.TOTPConfig{
 				Issuer:      a.config.TOTPIssuer,
 				AccountName: device.Name,
 			})
-			resp.TOTPQR = qr
 		}
 	}
 

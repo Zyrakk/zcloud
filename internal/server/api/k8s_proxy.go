@@ -47,14 +47,14 @@ func (a *API) handleK8sProxy(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Use k3s service account token for authentication
-	// First try the in-cluster service account token
-	k8sToken, err := os.ReadFile("/var/run/secrets/kubernetes.io/serviceaccount/token")
+	// Use k3s credentials for authentication
+	// First try the kubeconfig (typical for systemd service)
+	k8sToken, err := getKubeconfigToken(a.config.KubeconfigPath)
 	if err != nil {
-		// Fallback to kubeconfig token if not running in-cluster
-		k8sToken, err = getKubeconfigToken(a.config.KubeconfigPath)
+		// Fallback to in-cluster service account token (if running in pod)
+		k8sToken, err = os.ReadFile("/var/run/secrets/kubernetes.io/serviceaccount/token")
 		if err != nil {
-			http.Error(w, "failed to get k8s token: "+err.Error(), http.StatusInternalServerError)
+			http.Error(w, "failed to get k8s credentials: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
 	}

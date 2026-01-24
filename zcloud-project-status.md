@@ -131,6 +131,13 @@
 | Port forwarding | `zcloud port-forward` - Túnel TCP a servicios | ✅ |
 | Kubeconfig integration | `zcloud start/stop` - kubectl nativo + Powerlevel10k | ✅ |
 
+### 🔧 Bugs Corregidos (Enero 2026)
+
+| Bug | Ubicación | Descripción | Estado |
+|-----|-----------|-------------|--------|
+| TOTP no se generaba correctamente | `handlers.go` → `handleDeviceStatus()` | Regeneraba un secreto nuevo en lugar de usar el existente para el QR | ✅ Corregido |
+| Proxy k8s fallaba | `k8s_proxy.go` | Buscaba token in-cluster primero en lugar de usar kubeconfig de k3s | ✅ Corregido |
+
 ### ⏳ Pendiente
 
 | Funcionalidad | Descripción | Prioridad |
