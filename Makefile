@@ -19,7 +19,8 @@ build-server:
 	@echo "Building zcloud-server..."
 	@mkdir -p dist
 	GOOS=linux GOARCH=amd64 go build $(LDFLAGS) -o dist/zcloud-server-linux-amd64 ./cmd/zcloud-server
-	@echo "Done: dist/zcloud-server-linux-amd64"
+	GOOS=linux GOARCH=arm64 go build $(LDFLAGS) -o dist/zcloud-server-linux-arm64 ./cmd/zcloud-server
+	@echo "Done: dist/zcloud-server-linux-{amd64,arm64}"
 
 clean:
 	rm -rf dist/
