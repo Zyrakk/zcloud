@@ -756,7 +756,13 @@ zcloud port-forward grafana.monitoring.svc 3000:3000
 | Archivo | Descripción |
 |---------|-------------|
 | `internal/client/portforward.go` | Cliente WebSocket con listener TCP local |
-| `internal/server/api/portforward.go` | Handler WebSocket con proxy al servicio destino |
+| `internal/server/api/portforward.go` | Handler WebSocket con proxy al servicio destino + resolución DNS k8s |
+
+**Características:**
+- Resolución automática de nombres de servicio k8s (`.svc`, `.svc.cluster.local`)
+- Usa CoreDNS de k3s (10.43.0.10) para dominios k8s
+- Fallback a DNS del sistema para hostnames normales
+- Ideal para testing de servicios antes de exponerlos con Traefik Ingress
 
 ---
 
