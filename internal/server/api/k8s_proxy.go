@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"time"
 )
 
 // handleK8sProxy proxies requests to the local Kubernetes API
@@ -23,8 +24,11 @@ func (a *API) handleK8sProxy(w http.ResponseWriter, r *http.Request) {
 		k8sURL += "?" + r.URL.RawQuery
 	}
 
-	// Create the proxy request
-	proxyReq, err := http.NewRequest(r.Method, k8sURL, r.Body)
+	// Check if this is a watch request (requires streaming)
+	isWatch := isWatchRequest(r)
+
+	// Create the proxy request with context propagation for cancellation
+	proxyReq, err := http.NewRequestWithContext(r.Context(), r.Method, k8sURL, r.Body)
 	if err != nil {
 		http.Error(w, "failed to create proxy request: "+err.Error(), http.StatusInternalServerError)
 		return
@@ -61,10 +65,15 @@ func (a *API) handleK8sProxy(w http.ResponseWriter, r *http.Request) {
 	proxyReq.Header.Set("Authorization", "Bearer "+string(k8sToken))
 
 	// Create HTTP client with TLS skip verify (for self-signed k3s certs)
+	// Configure for long-lived streaming connections
 	client := &http.Client{
 		Transport: &http.Transport{
-			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+			TLSClientConfig:     &tls.Config{InsecureSkipVerify: true},
+			MaxIdleConnsPerHost: 10,
+			IdleConnTimeout:     90 * time.Second,
 		},
+		// No timeout for the client - watch requests are long-lived
+		// The context from the original request handles cancellation
 	}
 
 	// Execute the request
@@ -85,8 +94,45 @@ func (a *API) handleK8sProxy(w http.ResponseWriter, r *http.Request) {
 	// Set status code
 	w.WriteHeader(resp.StatusCode)
 
-	// Copy response body
-	io.Copy(w, resp.Body)
+	// Copy response body with streaming support for watch requests
+	if isWatch {
+		// Use flushing copy for watch/streaming requests
+		flushingCopy(w, resp.Body)
+	} else {
+		// Standard copy for regular requests
+		io.Copy(w, resp.Body)
+	}
+}
+
+// isWatchRequest checks if the request is a Kubernetes watch request
+func isWatchRequest(r *http.Request) bool {
+	return r.URL.Query().Get("watch") == "true"
+}
+
+// flushingCopy copies data from src to dst, flushing after each chunk
+// This is required for HTTP/2 streaming to work correctly with kubectl watch
+func flushingCopy(dst http.ResponseWriter, src io.Reader) error {
+	flusher, canFlush := dst.(http.Flusher)
+	buf := make([]byte, 32*1024) // 32KB buffer
+
+	for {
+		n, readErr := src.Read(buf)
+		if n > 0 {
+			_, writeErr := dst.Write(buf[:n])
+			if writeErr != nil {
+				return writeErr
+			}
+			if canFlush {
+				flusher.Flush()
+			}
+		}
+		if readErr == io.EOF {
+			return nil
+		}
+		if readErr != nil {
+			return readErr
+		}
+	}
 }
 
 // getKubeconfigToken extracts the token from a kubeconfig file
