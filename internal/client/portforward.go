@@ -144,7 +144,9 @@ func (p *PortForwardClient) handleConnection(conn net.Conn, targetHost string, t
 			default:
 				var msg protocol.PortForwardMessage
 				if err := wsConn.ReadJSON(&msg); err != nil {
-					if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseNormalClosure) {
+					// Suppress expected close errors (normal HTTP connection end, browser tab close, etc.)
+					if !websocket.IsCloseError(err, websocket.CloseGoingAway, websocket.CloseNormalClosure, websocket.CloseAbnormalClosure) &&
+						!websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseNormalClosure, websocket.CloseAbnormalClosure) {
 						log.Printf("WebSocket read error: %v", err)
 					}
 					return

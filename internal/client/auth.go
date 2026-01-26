@@ -106,12 +106,17 @@ func (a *Auth) Init(serverURL string) error {
 	if resp.Status == protocol.DeviceStatusPending {
 		fmt.Println("   ⏳ Dispositivo registrado, pendiente de aprobación")
 		fmt.Println()
-		fmt.Println("   El administrador debe aprobar este dispositivo con:")
-		fmt.Printf("   zcloud admin devices approve %s\n", resp.DeviceID)
+		fmt.Println("   El administrador debe aprobar este dispositivo en el servidor con:")
+		fmt.Printf("   zcloud-server admin devices approve %s\n", resp.DeviceID)
 		fmt.Println()
 		fmt.Println("   Después ejecuta: zcloud init --complete")
 	} else if resp.Status == protocol.DeviceStatusApproved {
-		return a.completeSetup(resp)
+		// Auto-approved (require_approval=false en servidor)
+		a.config.Device.Approved = true
+		fmt.Println()
+		fmt.Println("   ✅ Dispositivo aprobado automáticamente")
+		fmt.Println()
+		fmt.Println("   Ahora debes configurar TOTP con: zcloud totp")
 	}
 
 	fmt.Println()
@@ -145,47 +150,68 @@ func (a *Auth) CompleteInit() error {
 		return fmt.Errorf("dispositivo ha sido revocado")
 	}
 
-	return a.completeSetup(resp)
-}
-
-// completeSetup completa la configuración con TOTP
-func (a *Auth) completeSetup(resp *protocol.RegisterResponse) error {
 	fmt.Println()
 	fmt.Println("   ✅ Dispositivo aprobado")
 	fmt.Println()
-
-	if resp.TOTPSecret != "" {
-		fmt.Println("   Configura tu aplicación TOTP (Google Authenticator, Authy, etc.):")
-		fmt.Println()
-		fmt.Printf("   Secret: %s\n", resp.TOTPSecret)
-		fmt.Println()
-
-		// Mostrar QR si está disponible
-		if resp.TOTPQR != "" {
-			// El QR está en base64, podríamos mostrarlo en terminal
-			// pero es más fácil que el usuario use el secret directamente
-			fmt.Println("   (QR code disponible - usa el secret manual arriba)")
-		}
-
-		// Verificar que el TOTP funciona
-		fmt.Println()
-		fmt.Print("   Introduce el código TOTP para verificar: ")
-		code := readTOTP()
-
-		if !crypto.ValidateTOTP(resp.TOTPSecret, code) {
-			return fmt.Errorf("código TOTP inválido")
-		}
-
-		fmt.Println("   ✅ TOTP configurado correctamente")
-	}
 
 	a.config.Device.Approved = true
 	if err := a.config.Save(); err != nil {
 		return fmt.Errorf("failed to save config: %w", err)
 	}
 
-	fmt.Println()
 	fmt.Println("   🎉 Configuración completa!")
+	fmt.Println()
+	fmt.Println("   Ahora debes configurar TOTP con: zcloud totp")
+	fmt.Println("   Después podrás iniciar sesión con: zcloud login")
+
+	return nil
+}
+
+// SetupTOTP configura TOTP para un dispositivo aprobado
+func (a *Auth) SetupTOTP() error {
+	if !a.config.IsInitialized() {
+		return fmt.Errorf("dispositivo no inicializado, ejecuta 'zcloud init' primero")
+	}
+
+	if !a.config.IsApproved() {
+		return fmt.Errorf("dispositivo no aprobado, ejecuta 'zcloud init --complete' primero")
+	}
+
+	fmt.Println("🔐 Configuración TOTP")
+	fmt.Printf("   Dispositivo: %s (%s)\n", a.config.Device.Name, a.config.Device.ID[:8])
+	fmt.Println()
+
+	// Obtener el secreto TOTP del servidor
+	resp, err := a.client.GetDeviceStatus(a.config.Device.ID)
+	if err != nil {
+		return fmt.Errorf("failed to get TOTP secret: %w", err)
+	}
+
+	if resp.TOTPSecret == "" {
+		return fmt.Errorf("TOTP secret not available - contacta al administrador")
+	}
+
+	fmt.Println("   Configura tu aplicación TOTP (Google Authenticator, Authy, etc.):")
+	fmt.Println()
+	fmt.Printf("   Secret: %s\n", resp.TOTPSecret)
+	fmt.Println()
+
+	// Mostrar QR si está disponible
+	if resp.TOTPQR != "" {
+		fmt.Println("   (QR code disponible - usa el secret manual arriba)")
+	}
+
+	// Verificar que el TOTP funciona
+	fmt.Println()
+	fmt.Print("   Introduce el código TOTP para verificar: ")
+	code := readTOTP()
+
+	if !crypto.ValidateTOTP(resp.TOTPSecret, code) {
+		return fmt.Errorf("código TOTP inválido")
+	}
+
+	fmt.Println()
+	fmt.Println("   ✅ TOTP configurado correctamente")
 	fmt.Println()
 	fmt.Println("   Ahora puedes iniciar sesión con: zcloud login")
 

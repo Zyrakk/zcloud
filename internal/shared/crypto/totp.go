@@ -56,3 +56,21 @@ func GetTOTPURL(secret string, config TOTPConfig) string {
 	}
 	return key.URL()
 }
+
+// GenerateTOTPQRFromSecret genera un QR code base64 para un secreto TOTP existente
+func GenerateTOTPQRFromSecret(secret string, config TOTPConfig) (string, error) {
+	url := fmt.Sprintf(
+		"otpauth://totp/%s:%s?secret=%s&issuer=%s&algorithm=SHA1&digits=6&period=30",
+		config.Issuer,
+		config.AccountName,
+		secret,
+		config.Issuer,
+	)
+
+	qr, err := qrcode.Encode(url, qrcode.Medium, 256)
+	if err != nil {
+		return "", fmt.Errorf("failed to generate QR code: %w", err)
+	}
+
+	return base64.StdEncoding.EncodeToString(qr), nil
+}

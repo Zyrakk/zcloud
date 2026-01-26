@@ -81,9 +81,11 @@
 1. Cliente genera par de claves Ed25519
 2. Cliente envía clave pública al servidor
 3. Servidor crea registro con estado "pending"
-4. Admin aprueba dispositivo
+4. Admin aprueba dispositivo desde el SERVIDOR: zcloud-server admin devices approve <id>
 5. Servidor genera secreto TOTP
-6. Cliente configura app autenticador (Google Authenticator, etc.)
+6. Cliente verifica aprobación: zcloud init --complete
+7. Cliente configura TOTP: zcloud totp
+8. Cliente configura app autenticador (Google Authenticator, Authy, etc.)
 
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │                              LOGIN DIARIO                                    │
@@ -130,6 +132,15 @@
 | Transferencia de archivos | `zcloud cp` - Upload/download de archivos | ✅ |
 | Port forwarding | `zcloud port-forward` - Túnel TCP a servicios | ✅ |
 | Kubeconfig integration | `zcloud start/stop` - kubectl nativo + Powerlevel10k | ✅ |
+
+### 🔧 Bugs Corregidos (Enero 2026)
+
+| Bug | Ubicación | Descripción | Estado |
+|-----|-----------|-------------|--------|
+| TOTP no se generaba correctamente | `handlers.go` → `handleDeviceStatus()` | Regeneraba un secreto nuevo en lugar de usar el existente para el QR | ✅ v1.2.0 |
+| Proxy k8s fallaba (token) | `k8s_proxy.go` | Buscaba token in-cluster que no existe en systemd | ✅ v1.2.0 |
+| Proxy k8s fallaba (certificados) | `k8s_proxy.go` | k3s.yaml usa certificados de cliente, no tokens. Ahora usa `tls.X509KeyPair()` | ✅ v1.4.0 |
+| `login` no generaba kubeconfig | `cmd/zcloud/main.go` | `login` era inútil vs `start`. Ahora ambos generan kubeconfig | ✅ v1.4.0 |
 
 ### ⏳ Pendiente
 
@@ -214,10 +225,11 @@ zcloud/
 | Comando | Descripción |
 |---------|-------------|
 | `zcloud init <url>` | Configura el cliente por primera vez |
-| `zcloud init --complete` | Completa config después de aprobación |
+| `zcloud init --complete` | Verifica aprobación después de que admin apruebe |
+| `zcloud totp` | Configura TOTP para el dispositivo |
 | `zcloud start` | Inicia sesión diaria con TOTP + genera kubeconfig |
 | `zcloud stop` | Cierra sesión y limpia kubeconfig |
-| `zcloud login` | Inicia sesión con TOTP (legacy) |
+| `zcloud login` | Inicia sesión con TOTP |
 | `zcloud logout` | Cierra sesión |
 | `zcloud status` | Muestra estado del cluster |
 | `zcloud status --check-only` | Verificación silenciosa (exit code) |
@@ -227,9 +239,9 @@ zcloud/
 | `zcloud ssh` | Shell interactiva |
 | `zcloud cp <src> <dst>` | Transferencia de archivos |
 | `zcloud port-forward <host> <ports>` | Túnel TCP |
-| `zcloud admin devices list` | Lista dispositivos |
-| `zcloud admin devices approve <id>` | Aprueba dispositivo |
-| `zcloud admin devices revoke <id>` | Revoca dispositivo |
+| `zcloud admin devices list` | Lista dispositivos (requiere sesión admin) |
+| `zcloud admin devices approve <id>` | Aprueba dispositivo (requiere sesión admin) |
+| `zcloud admin devices revoke <id>` | Revoca dispositivo (requiere sesión admin) |
 
 ---
 
@@ -244,6 +256,17 @@ zcloud/
 - Servidor HTTP con graceful shutdown
 - Limpieza periódica de sesiones expiradas
 - Modo `--init` para primera configuración
+- **Comandos admin CLI directos (sin API)**
+
+**Comandos CLI admin:**
+
+| Comando | Descripción |
+|---------|-------------|
+| `zcloud-server admin devices list` | Lista dispositivos registrados |
+| `zcloud-server admin devices approve <id>` | Aprueba un dispositivo pendiente |
+| `zcloud-server admin devices revoke <id>` | Revoca un dispositivo |
+
+> 💡 Estos comandos operan directamente sobre la base de datos y no requieren sesión activa. Ideales para el primer dispositivo (problema del huevo y la gallina).
 
 **Configuración soportada:**
 
@@ -281,7 +304,8 @@ storage:
 | Función | Descripción |
 |---------|-------------|
 | `Init(serverURL)` | Genera claves, registra dispositivo |
-| `CompleteInit()` | Configura TOTP después de aprobación |
+| `CompleteInit()` | Verifica aprobación y marca dispositivo como aprobado |
+| `SetupTOTP()` | Configura TOTP para dispositivo aprobado |
 | `Login()` | Firma timestamp, envía TOTP, obtiene JWT |
 | `Logout()` | Invalida sesión local y remota |
 | `Status()` | Muestra estado de sesión y cluster |
@@ -732,7 +756,13 @@ zcloud port-forward grafana.monitoring.svc 3000:3000
 | Archivo | Descripción |
 |---------|-------------|
 | `internal/client/portforward.go` | Cliente WebSocket con listener TCP local |
-| `internal/server/api/portforward.go` | Handler WebSocket con proxy al servicio destino |
+| `internal/server/api/portforward.go` | Handler WebSocket con proxy al servicio destino + resolución DNS k8s |
+
+**Características:**
+- Resolución automática de nombres de servicio k8s (`.svc`, `.svc.cluster.local`)
+- Usa CoreDNS de k3s (10.43.0.10) para dominios k8s
+- Fallback a DNS del sistema para hostnames normales
+- Ideal para testing de servicios antes de exponerlos con Traefik Ingress
 
 ---
 

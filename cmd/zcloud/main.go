@@ -54,6 +54,7 @@ Ejemplos:
 		initCmd(),
 		loginCmd(),
 		logoutCmd(),
+		totpCmd(),
 		statusCmd(),
 		startCmd(),
 		stopCmd(),
@@ -126,11 +127,11 @@ Ejemplo:
 	return cmd
 }
 
-// loginCmd - Comando de login
+// loginCmd - Comando de login (alias de start)
 func loginCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "login",
-		Short: "Inicia sesión en el servidor",
+		Short: "Inicia sesión en el servidor (alias de 'start')",
 		Run: func(cmd *cobra.Command, args []string) {
 			auth, err := client.NewAuth(cfg)
 			if err != nil {
@@ -142,6 +143,14 @@ func loginCmd() *cobra.Command {
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				os.Exit(1)
 			}
+
+			// Generar kubeconfig con el nuevo token
+			if err := cfg.GenerateKubeconfig(cfg.Session.Token); err != nil {
+				fmt.Fprintf(os.Stderr, "Error generando kubeconfig: %v\n", err)
+				os.Exit(1)
+			}
+
+			fmt.Printf("☸ Kubeconfig: %s\n", cfg.KubeconfigPath())
 		},
 	}
 }
@@ -159,6 +168,32 @@ func logoutCmd() *cobra.Command {
 			}
 
 			if err := auth.Logout(); err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+		},
+	}
+}
+
+// totpCmd - Comando de configuración TOTP
+func totpCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "totp",
+		Short: "Configura TOTP para el dispositivo",
+		Long: `Configura la autenticación TOTP para un dispositivo aprobado.
+Debe ejecutarse después de que el administrador apruebe el dispositivo
+y antes del primer login.
+
+Ejemplo:
+  zcloud totp`,
+		Run: func(cmd *cobra.Command, args []string) {
+			auth, err := client.NewAuth(cfg)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+
+			if err := auth.SetupTOTP(); err != nil {
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				os.Exit(1)
 			}
