@@ -69,13 +69,16 @@ sudo make install-client
 # 1. Inicializar cliente
 zcloud init https://api.zyrak.cloud
 
-# 2. Esperar aprobación del admin (en el servidor)
-zcloud admin devices approve <device_id>
+# 2. En el SERVIDOR, aprobar el dispositivo
+zcloud-server admin devices approve <device_id>
 
-# 3. Completar configuración (configurar TOTP)
+# 3. En el cliente, verificar aprobación
 zcloud init --complete
 
-# 4. Configurar shell (añadir a ~/.zshrc o ~/.bashrc)
+# 4. Configurar TOTP
+zcloud totp
+
+# 5. Configurar shell (añadir a ~/.zshrc o ~/.bashrc)
 echo 'export KUBECONFIG="$HOME/.zcloud/kubeconfig:$KUBECONFIG"' >> ~/.zshrc
 source ~/.zshrc
 ```
@@ -119,6 +122,57 @@ zcloud admin devices approve <device_id>
 # Revocar dispositivo
 zcloud admin devices revoke <device_id>
 ```
+
+### 🔄 Actualización del binario
+
+Cuando hay nuevas versiones disponibles, sigue estos pasos para actualizar:
+
+**Cliente (cualquier Linux):**
+```bash
+cd ~/Git_Repos/zcloud  # O donde tengas el repositorio
+git pull
+make build-client
+sudo cp dist/zcloud-linux-amd64 /usr/local/bin/zcloud
+zcloud status  # Verificar que funciona
+```
+
+**Servidor (N150):**
+```bash
+cd ~/Git_Repos/zcloud
+git pull
+make build-server
+sudo systemctl stop zcloud-server
+sudo cp dist/zcloud-server-linux-amd64 /opt/zcloud-server/zcloud-server
+sudo systemctl start zcloud-server
+sudo systemctl status zcloud-server  # Verificar que arranca bien
+```
+
+### 🔑 Primera autorización de dispositivo
+
+Cuando inicias el servidor por primera vez, necesitas aprobar el primer dispositivo manualmente:
+
+```bash
+# 1. En el cliente, inicializa y obtén el device_id
+zcloud init https://api.zyrak.cloud
+# Anota el Device ID que te muestra
+
+# 2. En el servidor, aprobar el dispositivo y marcarlo como admin
+zcloud-server admin devices approve <device_id>
+# Para el primer dispositivo, también debes marcarlo como admin:
+sqlite3 /opt/zcloud-server/data/zcloud.db "UPDATE devices SET is_admin=1 WHERE id='<device_id>'"
+
+# 3. En el cliente, verificar aprobación
+zcloud init --complete
+
+# 4. Configurar TOTP
+zcloud totp
+
+# 5. Ya puedes usar zcloud normalmente
+zcloud login
+zcloud status
+```
+
+> 💡 **Después de esta configuración inicial**, podrás aprobar nuevos dispositivos directamente en el servidor con `zcloud-server admin devices approve <id>`.
 
 ## 📁 Estructura de archivos
 
