@@ -139,7 +139,7 @@
 |-----|-----------|-------------|--------|
 | TOTP no se generaba correctamente | `handlers.go` → `handleDeviceStatus()` | Regeneraba un secreto nuevo en lugar de usar el existente para el QR | ✅ v1.2.0 |
 | Proxy k8s fallaba (token) | `k8s_proxy.go` | Buscaba token in-cluster que no existe en systemd | ✅ v1.2.0 |
-| Proxy k8s fallaba (certificados) | `k8s_proxy.go` | k3s.yaml usa certificados de cliente, no tokens. Ahora usa `tls.X509KeyPair()` | ✅ v1.4.0 |
+| Proxy k8s fallaba (certificados) | `k8s_proxy.go` | k3s.yaml usa certificados de cliente, no tokens. Ahora usa `tls.X509KeyPair()` | ✅ v1.4.3 |
 | `login` no generaba kubeconfig | `cmd/zcloud/main.go` | `login` era inútil vs `start`. Ahora ambos generan kubeconfig | ✅ v1.4.0 |
 
 ### ⏳ Pendiente

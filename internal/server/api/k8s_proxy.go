@@ -2,12 +2,51 @@ package api
 
 import (
 	"crypto/tls"
+	"encoding/base64"
 	"io"
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"time"
+
+	"gopkg.in/yaml.v3"
 )
+
+// k8sClient caches the HTTP client with TLS config to avoid re-parsing kubeconfig
+var (
+	k8sClientOnce sync.Once
+	k8sClient     *http.Client
+	k8sClientErr  error
+)
+
+// kubeconfigFile represents the structure of a kubeconfig file
+type kubeconfigFile struct {
+	Clusters []struct {
+		Name    string `yaml:"name"`
+		Cluster struct {
+			Server                   string `yaml:"server"`
+			CertificateAuthorityData string `yaml:"certificate-authority-data"`
+			InsecureSkipTLSVerify    bool   `yaml:"insecure-skip-tls-verify"`
+		} `yaml:"cluster"`
+	} `yaml:"clusters"`
+	Users []struct {
+		Name string `yaml:"name"`
+		User struct {
+			ClientCertificateData string `yaml:"client-certificate-data"`
+			ClientKeyData         string `yaml:"client-key-data"`
+			Token                 string `yaml:"token"`
+		} `yaml:"user"`
+	} `yaml:"users"`
+	Contexts []struct {
+		Name    string `yaml:"name"`
+		Context struct {
+			Cluster string `yaml:"cluster"`
+			User    string `yaml:"user"`
+		} `yaml:"context"`
+	} `yaml:"contexts"`
+	CurrentContext string `yaml:"current-context"`
+}
 
 // handleK8sProxy proxies requests to the local Kubernetes API
 func (a *API) handleK8sProxy(w http.ResponseWriter, r *http.Request) {
@@ -42,7 +81,7 @@ func (a *API) handleK8sProxy(w http.ResponseWriter, r *http.Request) {
 			key == "Transfer-Encoding" || key == "Upgrade" {
 			continue
 		}
-		// Skip Authorization - we'll use k8s service account token instead
+		// Skip Authorization - we'll use k8s credentials from kubeconfig
 		if key == "Authorization" {
 			continue
 		}
@@ -51,29 +90,16 @@ func (a *API) handleK8sProxy(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Use k3s service account token for authentication
-	// First try the in-cluster service account token
-	k8sToken, err := os.ReadFile("/var/run/secrets/kubernetes.io/serviceaccount/token")
+	// Get or create HTTP client with proper authentication
+	client, token, err := a.getK8sClient()
 	if err != nil {
-		// Fallback to kubeconfig token if not running in-cluster
-		k8sToken, err = getKubeconfigToken(a.config.KubeconfigPath)
-		if err != nil {
-			http.Error(w, "failed to get k8s token: "+err.Error(), http.StatusInternalServerError)
-			return
-		}
+		http.Error(w, "failed to create k8s client: "+err.Error(), http.StatusInternalServerError)
+		return
 	}
-	proxyReq.Header.Set("Authorization", "Bearer "+string(k8sToken))
 
-	// Create HTTP client with TLS skip verify (for self-signed k3s certs)
-	// Configure for long-lived streaming connections
-	client := &http.Client{
-		Transport: &http.Transport{
-			TLSClientConfig:     &tls.Config{InsecureSkipVerify: true},
-			MaxIdleConnsPerHost: 10,
-			IdleConnTimeout:     90 * time.Second,
-		},
-		// No timeout for the client - watch requests are long-lived
-		// The context from the original request handles cancellation
+	// If we have a token (instead of client certs), add it to the header
+	if token != "" {
+		proxyReq.Header.Set("Authorization", "Bearer "+token)
 	}
 
 	// Execute the request
@@ -102,6 +128,115 @@ func (a *API) handleK8sProxy(w http.ResponseWriter, r *http.Request) {
 		// Standard copy for regular requests
 		io.Copy(w, resp.Body)
 	}
+}
+
+// getK8sClient creates an HTTP client with proper TLS configuration for k8s auth
+// It caches the client for subsequent requests
+func (a *API) getK8sClient() (*http.Client, string, error) {
+	var token string
+
+	k8sClientOnce.Do(func() {
+		// First try in-cluster service account token
+		tokenBytes, err := os.ReadFile("/var/run/secrets/kubernetes.io/serviceaccount/token")
+		if err == nil {
+			// Running in-cluster - use service account token with skip verify
+			token = string(tokenBytes)
+			k8sClient = &http.Client{
+				Transport: &http.Transport{
+					TLSClientConfig:     &tls.Config{InsecureSkipVerify: true},
+					MaxIdleConnsPerHost: 10,
+					IdleConnTimeout:     90 * time.Second,
+				},
+			}
+			return
+		}
+
+		// Not in-cluster - parse kubeconfig
+		kubeconfigPath := a.config.KubeconfigPath
+		if kubeconfigPath == "" {
+			k8sClientErr = os.ErrNotExist
+			return
+		}
+
+		data, err := os.ReadFile(kubeconfigPath)
+		if err != nil {
+			k8sClientErr = err
+			return
+		}
+
+		var kubeconfig kubeconfigFile
+		if err := yaml.Unmarshal(data, &kubeconfig); err != nil {
+			k8sClientErr = err
+			return
+		}
+
+		// Find current context's user
+		var currentUser string
+		for _, ctx := range kubeconfig.Contexts {
+			if ctx.Name == kubeconfig.CurrentContext {
+				currentUser = ctx.Context.User
+				break
+			}
+		}
+
+		// Find user credentials
+		for _, user := range kubeconfig.Users {
+			if user.Name == currentUser {
+				// Check if user has token (some kubeconfigs use token auth)
+				if user.User.Token != "" {
+					token = user.User.Token
+					k8sClient = &http.Client{
+						Transport: &http.Transport{
+							TLSClientConfig:     &tls.Config{InsecureSkipVerify: true},
+							MaxIdleConnsPerHost: 10,
+							IdleConnTimeout:     90 * time.Second,
+						},
+					}
+					return
+				}
+
+				// Use client certificate authentication (k3s default)
+				if user.User.ClientCertificateData != "" && user.User.ClientKeyData != "" {
+					certData, err := base64.StdEncoding.DecodeString(user.User.ClientCertificateData)
+					if err != nil {
+						k8sClientErr = err
+						return
+					}
+
+					keyData, err := base64.StdEncoding.DecodeString(user.User.ClientKeyData)
+					if err != nil {
+						k8sClientErr = err
+						return
+					}
+
+					cert, err := tls.X509KeyPair(certData, keyData)
+					if err != nil {
+						k8sClientErr = err
+						return
+					}
+
+					k8sClient = &http.Client{
+						Transport: &http.Transport{
+							TLSClientConfig: &tls.Config{
+								Certificates:       []tls.Certificate{cert},
+								InsecureSkipVerify: true, // k3s uses self-signed certs
+							},
+							MaxIdleConnsPerHost: 10,
+							IdleConnTimeout:     90 * time.Second,
+						},
+					}
+					return
+				}
+			}
+		}
+
+		k8sClientErr = os.ErrNotExist
+	})
+
+	if k8sClientErr != nil {
+		return nil, "", k8sClientErr
+	}
+	return k8sClient, token, nil
 }
 
 // isWatchRequest checks if the request is a Kubernetes watch request
@@ -133,29 +268,4 @@ func flushingCopy(dst http.ResponseWriter, src io.Reader) error {
 			return readErr
 		}
 	}
-}
-
-// getKubeconfigToken extracts the token from a kubeconfig file
-func getKubeconfigToken(kubeconfigPath string) ([]byte, error) {
-	// For server-side, we typically use a dedicated service account or admin config
-	// This is a fallback when not running in-cluster
-	data, err := os.ReadFile(kubeconfigPath)
-	if err != nil {
-		return nil, err
-	}
-
-	// Simple token extraction - look for "token:" in the file
-	// In production, you'd want proper YAML parsing
-	lines := strings.Split(string(data), "\n")
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if strings.HasPrefix(line, "token:") {
-			token := strings.TrimPrefix(line, "token:")
-			token = strings.TrimSpace(token)
-			token = strings.Trim(token, "\"'")
-			return []byte(token), nil
-		}
-	}
-
-	return nil, os.ErrNotExist
 }
