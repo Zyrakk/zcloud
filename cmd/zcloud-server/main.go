@@ -108,10 +108,12 @@ func main() {
 	// Configurar servidor HTTP
 	addr := fmt.Sprintf("%s:%d", config.Server.Host, config.Server.Port)
 	server := &http.Server{
-		Addr:         addr,
-		Handler:      apiServer.Router(),
-		ReadTimeout:  30 * time.Second,
-		WriteTimeout: 30 * time.Second,
+		Addr:        addr,
+		Handler:     apiServer.Router(),
+		ReadTimeout: 30 * time.Second,
+		// WriteTimeout must be 0 to support long-lived connections like kubectl watch/exec/logs
+		// The k8s proxy handler manages timeouts per-request for non-streaming requests
+		WriteTimeout: 0,
 		IdleTimeout:  120 * time.Second,
 	}
 
@@ -505,4 +507,3 @@ func truncate(s string, maxLen int) string {
 	}
 	return s[:maxLen-1] + "…"
 }
-
