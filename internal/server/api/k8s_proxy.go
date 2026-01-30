@@ -2,8 +2,10 @@ package api
 
 import (
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/base64"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"strings"
@@ -18,6 +20,7 @@ var (
 	k8sClientOnce sync.Once
 	k8sClient     *http.Client
 	k8sClientErr  error
+	k8sCACertPool  *x509.CertPool
 )
 
 // kubeconfigFile represents the structure of a kubeconfig file
@@ -136,14 +139,36 @@ func (a *API) getK8sClient() (*http.Client, string, error) {
 	var token string
 
 	k8sClientOnce.Do(func() {
+		// Load CA certificate if specified in config
+		if a.config.CACertPath != "" {
+			certData, err := os.ReadFile(a.config.CACertPath)
+			if err != nil {
+				log.Printf("Failed to read CA certificate: %v", err)
+				k8sClientErr = err
+				return
+			}
+
+			// Create certificate pool with CA
+			k8sCACertPool = x509.NewCertPool()
+			if !k8sCACertPool.AppendCertsFromPEM(certData) {
+				log.Printf("Failed to parse CA certificate")
+				k8sClientErr = err
+				return
+			}
+		}
+
 		// First try in-cluster service account token
 		tokenBytes, err := os.ReadFile("/var/run/secrets/kubernetes.io/serviceaccount/token")
 		if err == nil {
-			// Running in-cluster - use service account token with skip verify
+			// Running in-cluster - use service account token with proper CA validation
 			token = string(tokenBytes)
+			tlsConfig := &tls.Config{InsecureSkipVerify: false}
+			if k8sCACertPool != nil {
+				tlsConfig.RootCAs = k8sCACertPool
+			}
 			k8sClient = &http.Client{
 				Transport: &http.Transport{
-					TLSClientConfig:     &tls.Config{InsecureSkipVerify: true},
+					TLSClientConfig:     tlsConfig,
 					MaxIdleConnsPerHost: 10,
 					IdleConnTimeout:     90 * time.Second,
 				},
@@ -185,9 +210,13 @@ func (a *API) getK8sClient() (*http.Client, string, error) {
 				// Check if user has token (some kubeconfigs use token auth)
 				if user.User.Token != "" {
 					token = user.User.Token
+					tlsConfig := &tls.Config{InsecureSkipVerify: false}
+					if k8sCACertPool != nil {
+						tlsConfig.RootCAs = k8sCACertPool
+					}
 					k8sClient = &http.Client{
 						Transport: &http.Transport{
-							TLSClientConfig:     &tls.Config{InsecureSkipVerify: true},
+							TLSClientConfig:     tlsConfig,
 							MaxIdleConnsPerHost: 10,
 							IdleConnTimeout:     90 * time.Second,
 						},
@@ -215,12 +244,32 @@ func (a *API) getK8sClient() (*http.Client, string, error) {
 						return
 					}
 
+					// Use CA from config or kubeconfig
+					tlsConfig := &tls.Config{
+						Certificates: []tls.Certificate{cert},
+					}
+
+					// Try to load CA from kubeconfig if not specified in server config
+					if k8sCACertPool == nil {
+						for _, cluster := range kubeconfig.Clusters {
+							if cluster.Cluster.CertificateAuthorityData != "" {
+								caData, err := base64.StdEncoding.DecodeString(cluster.Cluster.CertificateAuthorityData)
+								if err == nil {
+									caPool := x509.NewCertPool()
+									if caPool.AppendCertsFromPEM(caData) {
+										tlsConfig.RootCAs = caPool
+										break
+									}
+								}
+							}
+						}
+					} else {
+						tlsConfig.RootCAs = k8sCACertPool
+					}
+
 					k8sClient = &http.Client{
 						Transport: &http.Transport{
-							TLSClientConfig: &tls.Config{
-								Certificates:       []tls.Certificate{cert},
-								InsecureSkipVerify: true, // k3s uses self-signed certs
-							},
+							TLSClientConfig:     tlsConfig,
 							MaxIdleConnsPerHost: 10,
 							IdleConnTimeout:     90 * time.Second,
 						},

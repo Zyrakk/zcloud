@@ -1,6 +1,6 @@
 .PHONY: all build build-client build-server clean install-client install-server test
 
-VERSION := 1.5.0
+VERSION := 1.5.1
 BUILD_TIME := $(shell date -u '+%Y-%m-%d_%H:%M:%S')
 LDFLAGS := -ldflags "-X main.Version=$(VERSION) -X main.BuildTime=$(BUILD_TIME)"
 

@@ -35,6 +35,11 @@ func (d *Database) Close() error {
 	return d.db.Close()
 }
 
+// Ping verifica que la base de datos está accesible
+func (d *Database) Ping() error {
+	return d.db.Ping()
+}
+
 func createTables(db *sql.DB) error {
 	schema := `
 	CREATE TABLE IF NOT EXISTS devices (

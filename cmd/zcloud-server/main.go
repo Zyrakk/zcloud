@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -45,6 +46,7 @@ type ServerConfig struct {
 	Kubernetes struct {
 		Kubeconfig string `yaml:"kubeconfig"`
 		CoreDNSIP  string `yaml:"coredns_ip"`
+		CACert     string `yaml:"ca_cert"`
 	} `yaml:"kubernetes"`
 
 	Storage struct {
@@ -77,6 +79,15 @@ func main() {
 		log.Fatalf("Failed to load config: %v", err)
 	}
 
+	// Validar configuración
+	if errs := validateConfig(config); len(errs) > 0 {
+		log.Println("❌ Configuration errors:")
+		for _, e := range errs {
+			log.Printf("  - %s", e)
+		}
+		log.Fatal("Please fix configuration errors before starting server")
+	}
+
 	// Cargar JWT secret
 	jwtSecret, err := loadOrCreateJWTSecret(config.Auth.JWTSecretFile)
 	if err != nil {
@@ -104,6 +115,7 @@ func main() {
 		RequireApproval: config.Auth.RequireApproval,
 		KubeconfigPath:  config.Kubernetes.Kubeconfig,
 		CoreDNSIP:       config.Kubernetes.CoreDNSIP,
+		CACertPath:      config.Kubernetes.CACert,
 	}
 	apiServer := api.New(database, apiConfig)
 
@@ -200,6 +212,21 @@ func loadConfig(path string) (*ServerConfig, error) {
 	if config.Kubernetes.CoreDNSIP == "" {
 		config.Kubernetes.CoreDNSIP = "10.43.0.10:53"
 	}
+	if config.Kubernetes.CACert == "" {
+		// Try common k3s CA locations
+		commonPaths := []string{
+			"/var/lib/rancher/k3s/server/tls/server-ca.crt",
+			"/etc/rancher/k3s/k3s.yaml", // Will extract from kubeconfig if needed
+		}
+		for _, path := range commonPaths {
+			if _, err := os.Stat(path); err == nil {
+				if path != "/etc/rancher/k3s/k3s.yaml" {
+					config.Kubernetes.CACert = path
+					break
+				}
+			}
+		}
+	}
 	if config.Storage.Database == "" {
 		config.Storage.Database = "/opt/zcloud-server/data/zcloud.db"
 	}
@@ -208,6 +235,83 @@ func loadConfig(path string) (*ServerConfig, error) {
 	}
 
 	return &config, nil
+}
+
+// validateConfig checks the configuration for errors and warnings
+func validateConfig(config *ServerConfig) []string {
+	var errors []string
+
+	// Validate server configuration
+	if config.Server.Port < 1 || config.Server.Port > 65535 {
+		errors = append(errors, "Invalid server port: must be between 1 and 65535")
+	}
+	if config.Server.Host == "" {
+		errors = append(errors, "Server host cannot be empty")
+	}
+
+	// Validate TLS configuration
+	if config.TLS.Cert != "" && config.TLS.Key == "" {
+		errors = append(errors, "TLS key specified but cert is missing")
+	}
+	if config.TLS.Key != "" && config.TLS.Cert == "" {
+		errors = append(errors, "TLS cert specified but key is missing")
+	}
+	if config.TLS.Cert != "" {
+		if _, err := os.Stat(config.TLS.Cert); os.IsNotExist(err) {
+			errors = append(errors, fmt.Sprintf("TLS cert file not found: %s", config.TLS.Cert))
+		}
+	}
+	if config.TLS.Key != "" {
+		if _, err := os.Stat(config.TLS.Key); os.IsNotExist(err) {
+			errors = append(errors, fmt.Sprintf("TLS key file not found: %s", config.TLS.Key))
+		}
+	}
+
+	// Validate auth configuration
+	if config.Auth.SessionTTL != "" {
+		if _, err := time.ParseDuration(config.Auth.SessionTTL); err != nil {
+			errors = append(errors, fmt.Sprintf("Invalid session_ttl: %s", config.Auth.SessionTTL))
+		}
+	}
+	if config.Auth.TOTPIssuer == "" {
+		errors = append(errors, "TOTP issuer cannot be empty")
+	}
+	if config.Auth.JWTSecretFile == "" {
+		errors = append(errors, "JWT secret file path cannot be empty")
+	}
+
+	// Validate Kubernetes configuration
+	if config.Kubernetes.Kubeconfig != "" {
+		if _, err := os.Stat(config.Kubernetes.Kubeconfig); os.IsNotExist(err) {
+			errors = append(errors, fmt.Sprintf("Kubeconfig file not found: %s", config.Kubernetes.Kubeconfig))
+		}
+	}
+	if config.Kubernetes.CoreDNSIP != "" {
+		host, port, err := net.SplitHostPort(config.Kubernetes.CoreDNSIP)
+		if err != nil {
+			errors = append(errors, fmt.Sprintf("Invalid CoreDNS IP:port: %s", config.Kubernetes.CoreDNSIP))
+		} else if host == "" || port == "" {
+			errors = append(errors, fmt.Sprintf("Invalid CoreDNS IP:port: %s", config.Kubernetes.CoreDNSIP))
+		}
+	}
+	if config.Kubernetes.CACert != "" {
+		if _, err := os.Stat(config.Kubernetes.CACert); os.IsNotExist(err) {
+			errors = append(errors, fmt.Sprintf("CA cert file not found: %s", config.Kubernetes.CACert))
+		}
+	}
+
+	// Validate storage configuration
+	if config.Storage.Database == "" {
+		errors = append(errors, "Database path cannot be empty")
+	}
+	
+	// Check parent directory exists for database
+	dbDir := filepath.Dir(config.Storage.Database)
+	if _, err := os.Stat(dbDir); os.IsNotExist(err) {
+		errors = append(errors, fmt.Sprintf("Database directory does not exist: %s", dbDir))
+	}
+
+	return errors
 }
 
 func loadOrCreateJWTSecret(path string) (string, error) {
@@ -275,6 +379,7 @@ auth:
  kubernetes:
   kubeconfig: /etc/rancher/k3s/k3s.yaml
   coredns_ip: 10.43.0.10:53
+  ca_cert: /var/lib/rancher/k3s/server/tls/server-ca.crt
 
  storage:
   database: /opt/zcloud-server/data/zcloud.db

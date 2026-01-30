@@ -22,9 +22,10 @@ import (
 
 // API representa el servidor API
 type API struct {
-	db     *db.Database
-	auth   *middleware.AuthMiddleware
-	config *Config
+	db           *db.Database
+	auth         *middleware.AuthMiddleware
+	config       *Config
+	auditLogger  *middleware.AuditLogger
 }
 
 // Config configuración de la API
@@ -35,16 +36,22 @@ type Config struct {
 	RequireApproval bool
 	KubeconfigPath  string
 	CoreDNSIP       string
+	CACertPath      string
 }
 
 // New crea una nueva API
 func New(database *db.Database, config *Config) *API {
 	auth := middleware.NewAuthMiddleware(config.JWTSecret)
 	auth.SetDatabase(database)
+
+	// Create audit logger
+	auditLogger := middleware.NewAuditLogger("info")
+
 	return &API{
-		db:     database,
-		auth:   auth,
-		config: config,
+		db:           database,
+		auth:         auth,
+		config:       config,
+		auditLogger:  auditLogger,
 	}
 }
 
@@ -94,13 +101,12 @@ func (a *API) Router() http.Handler {
 	mux.Handle("/api/v1/admin/", a.auth.Authenticate(a.auth.RequireAdmin(admin)))
 
 	// Health check
-	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte(`{"status": "ok"}`))
-	})
+	mux.HandleFunc("GET /health", a.handleHealthCheck)
+	mux.HandleFunc("GET /ready", a.handleReadyCheck)
 
 	// Aplicar middleware global
 	rateLimiter := middleware.NewRateLimiter(100, time.Minute)
-	handler := middleware.Logger(middleware.CORS(rateLimiter.Limit(mux)))
+	handler := middleware.Logger(middleware.SecurityHeaders(middleware.CORS(rateLimiter.Limit(mux))))
 
 	return handler
 }
@@ -187,6 +193,10 @@ func (a *API) handleRegister(w http.ResponseWriter, r *http.Request) {
 		resp.Message = "Device registered, awaiting approval"
 		// TODO: Enviar notificación al admin (Telegram, etc.)
 		log.Printf("New device pending approval: %s (%s)", req.DeviceName, deviceID)
+
+		// Audit log
+		deviceIP := r.RemoteAddr
+		a.auditLogger.LogAudit("device_pending", deviceID, fmt.Sprintf("name=%s hostname=%s os=%s ip=%s", req.DeviceName, req.Hostname, req.OS, deviceIP))
 	}
 
 	a.jsonResponse(w, resp, http.StatusCreated)
@@ -298,6 +308,10 @@ func (a *API) handleLogin(w http.ResponseWriter, r *http.Request) {
 	// Actualizar último acceso
 	_ = a.db.UpdateDeviceLastAccess(req.DeviceID)
 
+	// Audit log
+	loginIP := r.RemoteAddr
+	a.auditLogger.LogAudit("login_success", req.DeviceID, fmt.Sprintf("ip=%s", loginIP))
+
 	resp := &protocol.LoginResponse{
 		Token:     token,
 		ExpiresAt: expiresAt,
@@ -319,6 +333,10 @@ func (a *API) handleLogout(w http.ResponseWriter, r *http.Request) {
 		tokenHash := hashToken(tokenString)
 		expiresAt := time.Now().Add(a.config.SessionTTL)
 		_ = a.db.RevokeToken(tokenHash, expiresAt, "user_logout")
+
+		// Audit log
+		logoutIP := r.RemoteAddr
+		a.auditLogger.LogAudit("logout", deviceID, fmt.Sprintf("ip=%s", logoutIP))
 	}
 
 	// Eliminar sesiones del dispositivo
@@ -585,6 +603,10 @@ func (a *API) handleApproveDevice(w http.ResponseWriter, r *http.Request) {
 
 	log.Printf("Device approved: %s (%s)", device.Name, deviceID)
 
+	// Audit log
+	approveIP := r.RemoteAddr
+	a.auditLogger.LogAudit("device_approved", deviceID, fmt.Sprintf("name=%s ip=%s", device.Name, approveIP))
+
 	a.jsonResponse(w, map[string]string{"message": "Device approved"}, http.StatusOK)
 }
 
@@ -612,6 +634,10 @@ func (a *API) handleRevokeDevice(w http.ResponseWriter, r *http.Request) {
 
 	log.Printf("Device revoked: %s (%s)", device.Name, deviceID)
 
+	// Audit log
+	revokeIP := r.RemoteAddr
+	a.auditLogger.LogAudit("device_revoked", deviceID, fmt.Sprintf("name=%s ip=%s", device.Name, revokeIP))
+
 	a.jsonResponse(w, map[string]string{"message": "Device revoked"}, http.StatusOK)
 }
 
@@ -631,6 +657,36 @@ func (a *API) jsonResponse(w http.ResponseWriter, data interface{}, status int) 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(data)
+}
+
+// handleHealthCheck is a simple health check endpoint
+func (a *API) handleHealthCheck(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte(`{"status":"ok","timestamp":"` + time.Now().Format(time.RFC3339) + `"}`))
+}
+
+// handleReadyCheck is a readiness check endpoint that verifies dependencies
+func (a *API) handleReadyCheck(w http.ResponseWriter, r *http.Request) {
+	// Check database connectivity
+	if err := a.db.Ping(); err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		w.Write([]byte(`{"status":"not_ready","reason":"database_unavailable"}`))
+		return
+	}
+
+	// Check k8s connectivity
+	if _, _, err := a.getK8sClient(); err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		w.Write([]byte(`{"status":"not_ready","reason":"kubernetes_unavailable"}`))
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte(`{"status":"ready","timestamp":"` + time.Now().Format(time.RFC3339) + `"}`))
 }
 
 func (a *API) jsonError(w http.ResponseWriter, message string, status int) {

@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"log"
 	"net/http"
 	"strings"
 	"sync"
@@ -44,7 +45,7 @@ func NewAuthMiddleware(jwtSecret string) *AuthMiddleware {
 	}
 }
 
-// SetDatabase sets the database for token revocation checking
+// SetDatabase sets of database for token revocation checking
 func (m *AuthMiddleware) SetDatabase(db interface {
 	IsTokenRevoked(tokenHash string) (bool, error)
 }) {
@@ -231,6 +232,43 @@ func CORS(next http.Handler) http.Handler {
 	})
 }
 
+// SecurityHeaders middleware sets security-related HTTP headers
+func SecurityHeaders(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Content Security Policy
+		w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'")
+
+		// X-Frame-Options: prevent clickjacking
+		w.Header().Set("X-Frame-Options", "DENY")
+
+		// X-Content-Type-Options: prevent MIME-sniffing
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+
+		// X-XSS-Protection
+		w.Header().Set("X-XSS-Protection", "1; mode=block")
+
+		// Strict-Transport-Security (only on HTTPS)
+		if r.URL.Scheme == "https" || r.Header.Get("X-Forwarded-Proto") == "https" {
+			w.Header().Set("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+		}
+
+		// Referrer-Policy
+		w.Header().Set("Referrer-Policy", "strict-origin-when-cross-origin")
+
+		// Permissions-Policy (Feature Policy)
+		w.Header().Set("Permissions-Policy", "geolocation=(), microphone=(), camera=()")
+
+		// Cache-Control for endpoints that shouldn't be cached
+		if r.URL.Path == "/api/v1/auth/login" || r.URL.Path == "/api/v1/devices/register" {
+			w.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate")
+			w.Header().Set("Pragma", "no-cache")
+			w.Header().Set("Expires", "0")
+		}
+
+		next.ServeHTTP(w, r)
+	})
+}
+
 // Logger middleware para logging
 func Logger(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -247,7 +285,43 @@ func Logger(next http.Handler) http.Handler {
 		}
 
 		// Formato: [timestamp] METHOD /path device_id duration
-		// log.Printf("[%s] %s %s %s %v", time.Now().Format("15:04:05"), r.Method, r.URL.Path, deviceID, duration)
+		log.Printf("[%s] %s %s %s %v", time.Now().Format("15:04:05"), r.Method, r.URL.Path, deviceID, duration)
 		_ = duration // Evitar warning si no se usa
 	})
+}
+
+// AuditLogger logs important security events
+type AuditLogger struct {
+	logLevel string
+}
+
+// NewAuditLogger creates a new audit logger
+func NewAuditLogger(logLevel string) *AuditLogger {
+	return &AuditLogger{
+		logLevel: logLevel,
+	}
+}
+
+// LogAudit logs an audit event
+func (al *AuditLogger) LogAudit(event, deviceID, details string) {
+	if al.logLevel == "disabled" {
+		return
+	}
+
+	timestamp := time.Now().Format("2006-01-02 15:04:05")
+	logEntry := fmt.Sprintf("[%s] AUDIT: %s device=%s details=%s",
+		timestamp, event, deviceID, details)
+
+	switch al.logLevel {
+	case "debug":
+		log.Print(logEntry)
+	case "info":
+		log.Print(logEntry)
+	case "warn":
+		log.Print(logEntry)
+	case "error":
+		log.Print(logEntry)
+	default:
+		log.Print(logEntry)
+	}
 }

@@ -31,7 +31,9 @@ Sistema de gestión remota para clusters k3s. Permite conectarte y administrar t
 | 3 | TOTP | Verifica que es el usuario |
 | 4 | JWT (12h TTL) | Sesión temporal |
 | 5 | Token Revocation | Invalidación inmediata de sesiones |
-| 6 | Rate limiting | Previene ataques |
+| 6 | Security Headers | Protección XSS, clickjacking, etc. |
+| 7 | Rate limiting | Previene ataques |
+| 8 | Audit Logging | Rastro de seguridad |
 
 ### Token Revocation
 
@@ -43,6 +45,43 @@ ZCloud incluye un sistema de revocación de tokens JWT que permite invalidar ses
 - **Limpieza automática**: Tokens revocados expirados se eliminan automáticamente
 
 Esto garantiza que los tokens no pueden ser reutilizados después de un logout o revocación, mejorando significativamente la seguridad.
+
+### Security Headers
+
+ZCloud implementa headers de seguridad HTTP para proteger contra ataques comunes:
+
+- **Content-Security-Policy (CSP)**: Previene ataques XSS
+- **X-Frame-Options: DENY**: Previene clickjacking
+- **X-Content-Type-Options: nosniff**: Previene MIME-sniffing
+- **X-XSS-Protection**: Protección XSS adicional
+- **Strict-Transport-Security (HSTS)**: Previene downgrade HTTPS
+- **Referrer-Policy**: Privacidad de referer
+- **Permissions-Policy**: Control de características del navegador
+
+### TLS Verification
+
+ZCloud ahora valida correctamente los certificados TLS del cluster k3s:
+
+- **Verificación de CA**: Utiliza certificados CA válidos en lugar de `InsecureSkipVerify`
+- **Soporte para CA personalizada**: Configurable vía `kubernetes.ca_cert`
+- **Autodetección**: Descubre CA del kubeconfig si no se especifica
+- **Seguridad**: Previene ataques MITM en la comunicación con k3s
+
+### Audit Logging
+
+ZCloud registra eventos de seguridad importantes para auditoría:
+
+- **Eventos registrados**: Registro de dispositivos, login, logout, aprobación, revocación
+- **Configurable**: Nivel de log ajustable (debug/info/warn/error/disabled)
+- **Timestamped**: Todos los eventos incluyen fecha/hora precisa
+- **Detalles**: Incluye device ID, IP y detalles adicionales
+
+Ejemplo de logs:
+```
+[2025-01-30 14:30:00] AUDIT: device_registered device=a1b2c3d4e5f6 details=name=my-laptop
+[2025-01-30 14:30:15] AUDIT: login_success device=a1b2c3d4e5f6 details=ip=192.168.1.100
+[2025-01-30 14:45:22] AUDIT: logout device=a1b2c3d4e5f6 details=ip=192.168.1.100
+```
 
 ## 📦 Instalación
 
@@ -243,8 +282,71 @@ storage:
 **Configuración Kubernetes:**
 - `kubeconfig`: Path al archivo kubeconfig de k3s
 - `coredns_ip`: IP del servicio CoreDNS para resolución de servicios k8s (default: `10.43.0.10:53`)
-  - Ajustar si tu cluster k3s usa una IP diferente para CoreDNS
-  - Necesario para que funcione el port forwarding a servicios k8s
+   - Ajustar si tu cluster k3s usa una IP diferente para CoreDNS
+   - Necesario para que funcione el port forwarding a servicios k8s
+- `ca_cert`: Path al certificado CA del cluster k3s (opcional)
+   - Si se especifica, se usa para verificar las conexiones TLS al cluster k3s
+   - Si no se especifica, se intenta extraer del kubeconfig automáticamente
+   - Mejora la seguridad al validar certificados en lugar de usar InsecureSkipVerify
+
+## 🏥 Health Checks
+
+ZCloud expone endpoints de salud para monitoreo y orquestación:
+
+### `/health` - Liveness check
+```bash
+curl https://api.zyrak.cloud/health
+```
+
+Respuesta:
+```json
+{
+  "status": "ok",
+  "timestamp": "2025-01-30T14:30:00Z"
+}
+```
+
+### `/ready` - Readiness check
+```bash
+curl https://api.zyrak.cloud/ready
+```
+
+Respuesta (cuando está listo):
+```json
+{
+  "status": "ready",
+  "timestamp": "2025-01-30T14:30:00Z"
+}
+```
+
+Respuesta (cuando hay problemas):
+```json
+{
+  "status": "not_ready",
+  "reason": "database_unavailable"
+}
+```
+
+Posibles razones:
+- `database_unavailable`: No se puede conectar a la base de datos
+- `kubernetes_unavailable`: No se puede conectar a la API de k8s
+
+### Uso con orquestadores
+```yaml
+# Kubernetes livenessProbe
+livenessProbe:
+  httpGet:
+    path: /health
+    port: 443
+    scheme: HTTPS
+
+# Kubernetes readinessProbe
+readinessProbe:
+  httpGet:
+    path: /ready
+    port: 443
+    scheme: HTTPS
+```
 
 ## 🔧 Desarrollo
 
