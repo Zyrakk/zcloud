@@ -60,8 +60,18 @@ func createTables(db *sql.DB) error {
 		FOREIGN KEY (device_id) REFERENCES devices(id)
 	);
 
+	CREATE TABLE IF NOT EXISTS revoked_tokens (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		token_hash TEXT NOT NULL UNIQUE,
+		revoked_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+		reason TEXT,
+		expires_at DATETIME NOT NULL
+	);
+
 	CREATE INDEX IF NOT EXISTS idx_sessions_device ON sessions(device_id);
 	CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires_at);
+	CREATE INDEX IF NOT EXISTS idx_revoked_tokens_hash ON revoked_tokens(token_hash);
+	CREATE INDEX IF NOT EXISTS idx_revoked_tokens_expires ON revoked_tokens(expires_at);
 	`
 
 	_, err := db.Exec(schema)
@@ -240,6 +250,37 @@ func (d *Database) CreateSession(id, deviceID, tokenHash string, expiresAt time.
 	return nil
 }
 
+// RevokeDeviceTokens revoca todos los tokens de un dispositivo
+func (d *Database) RevokeDeviceTokens(deviceID string) error {
+	// Obtener todos los tokens del dispositivo
+	rows, err := d.db.Query(`SELECT token_hash, expires_at FROM sessions WHERE device_id = ?`, deviceID)
+	if err != nil {
+		return fmt.Errorf("failed to query device sessions: %w", err)
+	}
+	defer rows.Close()
+
+	var tokenHashes []string
+	var expiresAts []time.Time
+
+	for rows.Next() {
+		var tokenHash string
+		var expiresAt time.Time
+		if err := rows.Scan(&tokenHash, &expiresAt); err != nil {
+			continue
+		}
+		tokenHashes = append(tokenHashes, tokenHash)
+		expiresAts = append(expiresAts, expiresAt)
+	}
+
+	// Revocar todos los tokens
+	for i, tokenHash := range tokenHashes {
+		_ = d.RevokeToken(tokenHash, expiresAts[i], "device_revoked")
+	}
+
+	// Eliminar sesiones del dispositivo
+	return d.DeleteDeviceSessions(deviceID)
+}
+
 // DeleteSession elimina una sesión
 func (d *Database) DeleteSession(id string) error {
 	_, err := d.db.Exec(`DELETE FROM sessions WHERE id = ?`, id)
@@ -265,6 +306,35 @@ func (d *Database) CleanExpiredSessions() error {
 		return fmt.Errorf("failed to clean expired sessions: %w", err)
 	}
 	return nil
+}
+
+// RevokeToken revoca un token específico
+func (d *Database) RevokeToken(tokenHash string, expiresAt time.Time, reason string) error {
+	_, err := d.db.Exec(`
+		INSERT INTO revoked_tokens (token_hash, revoked_at, reason, expires_at)
+		VALUES (?, ?, ?, ?)
+	`, tokenHash, time.Now(), reason, expiresAt)
+	if err != nil {
+		return fmt.Errorf("failed to revoke token: %w", err)
+	}
+	return nil
+}
+
+// IsTokenRevoked verifica si un token está revocado
+func (d *Database) IsTokenRevoked(tokenHash string) (bool, error) {
+	// Limpiar tokens revocados expirados primero
+	_, err := d.db.Exec(`DELETE FROM revoked_tokens WHERE expires_at < ?`, time.Now())
+	if err != nil {
+		return false, fmt.Errorf("failed to clean expired revoked tokens: %w", err)
+	}
+
+	var count int
+	err = d.db.QueryRow(`SELECT COUNT(*) FROM revoked_tokens WHERE token_hash = ?`, tokenHash).Scan(&count)
+	if err != nil {
+		return false, fmt.Errorf("failed to check token revocation: %w", err)
+	}
+
+	return count > 0, nil
 }
 
 // GetActiveSessions obtiene las sesiones activas

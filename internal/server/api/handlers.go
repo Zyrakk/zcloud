@@ -34,13 +34,16 @@ type Config struct {
 	TOTPIssuer      string
 	RequireApproval bool
 	KubeconfigPath  string
+	CoreDNSIP       string
 }
 
 // New crea una nueva API
 func New(database *db.Database, config *Config) *API {
+	auth := middleware.NewAuthMiddleware(config.JWTSecret)
+	auth.SetDatabase(database)
 	return &API{
 		db:     database,
-		auth:   middleware.NewAuthMiddleware(config.JWTSecret),
+		auth:   auth,
 		config: config,
 	}
 }
@@ -306,6 +309,17 @@ func (a *API) handleLogin(w http.ResponseWriter, r *http.Request) {
 
 func (a *API) handleLogout(w http.ResponseWriter, r *http.Request) {
 	deviceID := middleware.GetDeviceID(r)
+
+	// Obtener el token del header Authorization
+	authHeader := r.Header.Get("Authorization")
+	if authHeader != "" && strings.HasPrefix(authHeader, "Bearer ") {
+		tokenString := strings.TrimPrefix(authHeader, "Bearer ")
+
+		// Revocar el token
+		tokenHash := hashToken(tokenString)
+		expiresAt := time.Now().Add(a.config.SessionTTL)
+		_ = a.db.RevokeToken(tokenHash, expiresAt, "user_logout")
+	}
 
 	// Eliminar sesiones del dispositivo
 	_ = a.db.DeleteDeviceSessions(deviceID)
@@ -593,8 +607,8 @@ func (a *API) handleRevokeDevice(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Eliminar sesiones activas
-	_ = a.db.DeleteDeviceSessions(deviceID)
+	// Revocar todos los tokens del dispositivo
+	_ = a.db.RevokeDeviceTokens(deviceID)
 
 	log.Printf("Device revoked: %s (%s)", device.Name, deviceID)
 

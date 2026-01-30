@@ -92,6 +92,34 @@ func LoadFromFiles(dir string) (*KeyPair, error) {
 	}, nil
 }
 
+// LoadFromKeyStrings carga las claves desde strings (para tests)
+func LoadFromKeyStrings(publicKeyB64, privateKeyB64 string) (*KeyPair, error) {
+	privBytes, err := base64.StdEncoding.DecodeString(privateKeyB64)
+	if err != nil {
+		return nil, fmt.Errorf("failed to decode private key: %w", err)
+	}
+
+	if len(privBytes) != ed25519.PrivateKeySize {
+		return nil, fmt.Errorf("invalid private key size")
+	}
+
+	priv := ed25519.PrivateKey(privBytes)
+
+	pubBytes, err := base64.StdEncoding.DecodeString(publicKeyB64)
+	if err != nil {
+		return nil, fmt.Errorf("failed to decode public key: %w", err)
+	}
+
+	if len(pubBytes) != ed25519.PublicKeySize {
+		return nil, fmt.Errorf("invalid public key size")
+	}
+
+	return &KeyPair{
+		PrivateKey: priv,
+		PublicKey:  pubBytes,
+	}, nil
+}
+
 // VerifySignature verifica una firma con una clave pública
 func VerifySignature(publicKeyB64, message, signatureB64 string) (bool, error) {
 	pubBytes, err := base64.StdEncoding.DecodeString(publicKeyB64)

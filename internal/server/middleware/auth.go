@@ -2,8 +2,12 @@ package middleware
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
@@ -27,13 +31,24 @@ type JWTClaims struct {
 // AuthMiddleware middleware de autenticación JWT
 type AuthMiddleware struct {
 	jwtSecret []byte
+	db        interface {
+		IsTokenRevoked(tokenHash string) (bool, error)
+	}
 }
 
 // NewAuthMiddleware crea un nuevo middleware de autenticación
 func NewAuthMiddleware(jwtSecret string) *AuthMiddleware {
 	return &AuthMiddleware{
 		jwtSecret: []byte(jwtSecret),
+		db:        nil,
 	}
+}
+
+// SetDatabase sets the database for token revocation checking
+func (m *AuthMiddleware) SetDatabase(db interface {
+	IsTokenRevoked(tokenHash string) (bool, error)
+}) {
+	m.db = db
 }
 
 // GenerateToken genera un nuevo JWT
@@ -71,10 +86,27 @@ func (m *AuthMiddleware) ValidateToken(tokenString string) (*JWTClaims, error) {
 	}
 
 	if claims, ok := token.Claims.(*JWTClaims); ok && token.Valid {
+		// Check if token is revoked
+		if m.db != nil {
+			tokenHash := hashToken(tokenString)
+			revoked, err := m.db.IsTokenRevoked(tokenHash)
+			if err != nil {
+				return nil, fmt.Errorf("failed to check token revocation: %w", err)
+			}
+			if revoked {
+				return nil, jwt.ErrTokenInvalidClaims
+			}
+		}
 		return claims, nil
 	}
 
 	return nil, jwt.ErrSignatureInvalid
+}
+
+// hashToken genera un hash SHA256 del token para almacenamiento seguro
+func hashToken(token string) string {
+	hash := sha256.Sum256([]byte(token))
+	return hex.EncodeToString(hash[:])
 }
 
 // Authenticate middleware que verifica el JWT
@@ -135,6 +167,7 @@ type RateLimiter struct {
 	requests map[string][]time.Time
 	limit    int
 	window   time.Duration
+	mu       sync.RWMutex
 }
 
 // NewRateLimiter crea un nuevo rate limiter
@@ -154,6 +187,9 @@ func (rl *RateLimiter) Limit(next http.Handler) http.Handler {
 		now := time.Now()
 		windowStart := now.Add(-rl.window)
 
+		// Lock for write operations
+		rl.mu.Lock()
+
 		// Limpiar requests antiguos
 		var validRequests []time.Time
 		for _, t := range rl.requests[ip] {
@@ -165,12 +201,15 @@ func (rl *RateLimiter) Limit(next http.Handler) http.Handler {
 
 		// Verificar límite
 		if len(rl.requests[ip]) >= rl.limit {
+			rl.mu.Unlock()
 			http.Error(w, `{"error": "rate limit exceeded"}`, http.StatusTooManyRequests)
 			return
 		}
 
 		// Registrar request
 		rl.requests[ip] = append(rl.requests[ip], now)
+
+		rl.mu.Unlock()
 
 		next.ServeHTTP(w, r)
 	})

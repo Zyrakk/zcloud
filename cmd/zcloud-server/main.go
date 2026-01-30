@@ -44,6 +44,7 @@ type ServerConfig struct {
 
 	Kubernetes struct {
 		Kubeconfig string `yaml:"kubeconfig"`
+		CoreDNSIP  string `yaml:"coredns_ip"`
 	} `yaml:"kubernetes"`
 
 	Storage struct {
@@ -102,6 +103,7 @@ func main() {
 		TOTPIssuer:      config.Auth.TOTPIssuer,
 		RequireApproval: config.Auth.RequireApproval,
 		KubeconfigPath:  config.Kubernetes.Kubeconfig,
+		CoreDNSIP:       config.Kubernetes.CoreDNSIP,
 	}
 	apiServer := api.New(database, apiConfig)
 
@@ -195,6 +197,9 @@ func loadConfig(path string) (*ServerConfig, error) {
 	if config.Kubernetes.Kubeconfig == "" {
 		config.Kubernetes.Kubeconfig = "/etc/rancher/k3s/k3s.yaml"
 	}
+	if config.Kubernetes.CoreDNSIP == "" {
+		config.Kubernetes.CoreDNSIP = "10.43.0.10:53"
+	}
 	if config.Storage.Database == "" {
 		config.Storage.Database = "/opt/zcloud-server/data/zcloud.db"
 	}
@@ -267,10 +272,11 @@ auth:
   totp_issuer: "ZCloud"
   require_approval: true
 
-kubernetes:
+ kubernetes:
   kubeconfig: /etc/rancher/k3s/k3s.yaml
+  coredns_ip: 10.43.0.10:53
 
-storage:
+ storage:
   database: /opt/zcloud-server/data/zcloud.db
 `
 		if err := os.WriteFile(configPath, []byte(defaultConfig), 0600); err != nil {

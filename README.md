@@ -30,7 +30,19 @@ Sistema de gestión remota para clusters k3s. Permite conectarte y administrar t
 | 2 | Device Key (Ed25519) | Identifica el dispositivo |
 | 3 | TOTP | Verifica que es el usuario |
 | 4 | JWT (12h TTL) | Sesión temporal |
-| 5 | Rate limiting | Previene ataques |
+| 5 | Token Revocation | Invalidación inmediata de sesiones |
+| 6 | Rate limiting | Previene ataques |
+
+### Token Revocation
+
+ZCloud incluye un sistema de revocación de tokens JWT que permite invalidar sesiones inmediatamente:
+
+- **Logout explícito**: Los tokens se revocan al ejecutar `zcloud stop`
+- **Revocación de dispositivo**: Todos los tokens de un dispositivo se revocan al revocarlo
+- **Blacklist automático**: Sistema de blacklist para tokens revocados
+- **Limpieza automática**: Tokens revocados expirados se eliminan automáticamente
+
+Esto garantiza que los tokens no pueden ser reutilizados después de un logout o revocación, mejorando significativamente la seguridad.
 
 ## 📦 Instalación
 
@@ -218,14 +230,21 @@ auth:
   jwt_secret_file: /opt/zcloud-server/data/jwt.secret
   session_ttl: 12h
   totp_issuer: "ZCloud"
-  require_approval: true  # Los nuevos dispositivos requieren aprobación
+  require_approval: true
 
 kubernetes:
   kubeconfig: /etc/rancher/k3s/k3s.yaml
+  coredns_ip: 10.43.0.10:53
 
 storage:
   database: /opt/zcloud-server/data/zcloud.db
 ```
+
+**Configuración Kubernetes:**
+- `kubeconfig`: Path al archivo kubeconfig de k3s
+- `coredns_ip`: IP del servicio CoreDNS para resolución de servicios k8s (default: `10.43.0.10:53`)
+  - Ajustar si tu cluster k3s usa una IP diferente para CoreDNS
+  - Necesario para que funcione el port forwarding a servicios k8s
 
 ## 🔧 Desarrollo
 
@@ -249,6 +268,32 @@ make dev-server
 # Desarrollo local (cliente)
 make dev-client
 ```
+
+## 🧪 Testing
+
+ZCloud incluye un conjunto completo de pruebas unitarias para garantizar la calidad y estabilidad del código:
+
+```bash
+# Ejecutar todas las pruebas
+make test
+
+# Ejecutar pruebas de un paquete específico
+go test ./internal/server/db/...
+go test ./internal/shared/crypto/...
+go test ./internal/server/middleware/...
+
+# Ejecutar pruebas con cobertura
+go test -cover ./...
+```
+
+### Cobertura de Pruebas
+
+- **Database Operations**: 20 casos de prueba para operaciones CRUD, sesiones y revocación
+- **Cryptography**: 13 casos de prueba para generación de claves, firmas y TOTP
+- **Authentication**: 21 casos de prueba para JWT, middleware y seguridad
+- **Rate Limiting**: 10 casos de prueba incluyendo concurrencia y expiración
+
+Todas las pruebas pasan con éxito, garantizando la estabilidad de los componentes críticos.
 
 ## 📋 API Reference
 

@@ -17,9 +17,6 @@ import (
 	"github.com/zyrak/zcloud/internal/shared/protocol"
 )
 
-// k3s CoreDNS default IP (kube-dns service in kube-system)
-const k3sCoreDNSIP = "10.43.0.10:53"
-
 // k8sSuffixes are domain suffixes that should use k8s DNS
 var k8sSuffixes = []string{
 	".svc.cluster.local",
@@ -40,7 +37,7 @@ func isK8sHostname(host string) bool {
 }
 
 // resolveK8sHostname resolves a k8s service name using CoreDNS
-func resolveK8sHostname(ctx context.Context, host string) (string, error) {
+func (a *API) resolveK8sHostname(ctx context.Context, host string) (string, error) {
 	// Normalize: add .cluster.local if needed
 	normalizedHost := host
 	if strings.HasSuffix(host, ".svc") && !strings.HasSuffix(host, ".svc.cluster.local") {
@@ -49,12 +46,17 @@ func resolveK8sHostname(ctx context.Context, host string) (string, error) {
 		normalizedHost = host + ".cluster.local"
 	}
 
-	// Create resolver pointing to k3s CoreDNS
+	// Create resolver pointing to k3s CoreDNS (from config)
+	corednsIP := a.config.CoreDNSIP
+	if corednsIP == "" {
+		corednsIP = "10.43.0.10:53"
+	}
+
 	resolver := &net.Resolver{
 		PreferGo: true,
 		Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
 			d := net.Dialer{Timeout: 5 * time.Second}
-			return d.DialContext(ctx, "udp", k3sCoreDNSIP)
+			return d.DialContext(ctx, "udp", corednsIP)
 		},
 	}
 
@@ -73,12 +75,12 @@ func resolveK8sHostname(ctx context.Context, host string) (string, error) {
 }
 
 // dialTarget connects to target, using k8s DNS for service names
-func dialTarget(ctx context.Context, host string, port string) (net.Conn, error) {
+func (a *API) dialTarget(ctx context.Context, host string, port string) (net.Conn, error) {
 	resolvedHost := host
 
 	// Use k8s DNS for kubernetes hostnames
 	if isK8sHostname(host) {
-		ip, err := resolveK8sHostname(ctx, host)
+		ip, err := a.resolveK8sHostname(ctx, host)
 		if err != nil {
 			return nil, err
 		}
@@ -121,7 +123,7 @@ func (a *API) handlePortForward(w http.ResponseWriter, r *http.Request) {
 
 	// Conectar al destino usando k8s DNS si es necesario
 	ctx := r.Context()
-	targetConn, err := dialTarget(ctx, targetHost, targetPortStr)
+	targetConn, err := a.dialTarget(ctx, targetHost, targetPortStr)
 	if err != nil {
 		log.Printf("Failed to connect to target %s:%s: %v", targetHost, targetPortStr, err)
 		sendPortForwardError(conn, "failed to connect to target: "+err.Error())

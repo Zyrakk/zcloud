@@ -1,7 +1,7 @@
 # ZCLOUD CLI - Estado del Proyecto
 
-> **Versión:** 1.0.0-alpha  
-> **Fecha:** Enero 2026  
+> **Versión:** 1.5.0
+> **Fecha:** Enero 2026
 > **Autor:** Zyrak
 
 ---
@@ -11,11 +11,12 @@
 1. [Resumen del Proyecto](#resumen-del-proyecto)
 2. [Arquitectura](#arquitectura)
 3. [Estado Actual](#estado-actual)
-4. [Estructura de Archivos](#estructura-de-archivos)
-5. [Detalle de Cada Archivo](#detalle-de-cada-archivo)
-6. [Funcionalidades Pendientes](#funcionalidades-pendientes)
-7. [Roadmap de Desarrollo](#roadmap-de-desarrollo)
-8. [Guía de Despliegue](#guía-de-despliegue)
+4. [Cambios Recientes (v1.5.0)](#cambios-recientes-v150)
+5. [Estructura de Archivos](#estructura-de-archivos)
+6. [Detalle de Cada Archivo](#detalle-de-cada-archivo)
+7. [Funcionalidades Pendientes](#funcionalidades-pendientes)
+8. [Roadmap de Desarrollo](#roadmap-de-desarrollo)
+9. [Guía de Despliegue](#guía-de-despliegue)
 
 ---
 
@@ -131,6 +132,16 @@
 | SSH tunneling | `zcloud ssh` - Shell interactiva via WebSocket | ✅ |
 | Transferencia de archivos | `zcloud cp` - Upload/download de archivos | ✅ |
 | Port forwarding | `zcloud port-forward` - Túnel TCP a servicios | ✅ |
+
+### ✅ Completado (v1.5.0 - Mejoras de Seguridad y Calidad)
+
+| Mejora | Descripción | Beneficio |
+|--------|-------------|-----------|
+| Token Revocation | Sistema de blacklist para invalidación inmediata de sesiones | Mayor seguridad - tokens inválidos tras logout |
+| Configurable CoreDNS IP | IP de CoreDNS configurable en config.yaml | Soporta clusters k3s personalizados |
+| Thread Safety | Mutex en rate limiter para acceso concurrente | Previene race conditions |
+| Unit Tests | 64 casos de prueba en 4 paquetes | Garantiza calidad y estabilidad |
+| Device Token Revocation | Revocación de todos los tokens de un dispositivo | Control total de sesiones por dispositivo |
 | Kubeconfig integration | `zcloud start/stop` - kubectl nativo + Powerlevel10k | ✅ |
 
 ### 🔧 Bugs Corregidos (Enero 2026)
