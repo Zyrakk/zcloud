@@ -39,3 +39,8 @@ configs/dev-config.yaml
 
 # Logs
 *.log
+
+# AI assistant context files
+CLAUDE.md
+CODEBASE_SUMMARY.md
+CHANGELOG_CONTEXT.md
