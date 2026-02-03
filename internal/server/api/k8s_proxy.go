@@ -268,12 +268,10 @@ func (a *API) getK8sClient() (*http.Client, string, error) {
 		Transport: &http.Transport{
 			TLSClientConfig: tlsConfig,
 			// Disable HTTP/2 to avoid connection reuse issues with Helm
-			ForceAttemptHTTP2: false,
+			TLSNextProto: make(map[string]func(authority string, c *tls.Conn) http.RoundTripper),
 			// Use shorter idle timeout to avoid stale connections
 			MaxIdleConnsPerHost: 2,
 			IdleConnTimeout:     30 * time.Second,
-			// Disable connection pooling for more reliable behavior
-			DisableHTTP2:        true,
 		},
 		Timeout: 60 * time.Second,
 	}
