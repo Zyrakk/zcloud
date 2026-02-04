@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/skip2/go-qrcode"
 	"golang.org/x/term"
 
 	"github.com/zyrak/zcloud/internal/shared/crypto"
@@ -74,6 +75,12 @@ func (a *Auth) Init(serverURL string) error {
 		deviceName = hostname
 	}
 
+	// User/persona name (for approval hint)
+	userName := promptString(fmt.Sprintf("   User/persona name [%s]: ", deviceName))
+	if userName == "" {
+		userName = deviceName
+	}
+
 	// Register device
 	fmt.Println()
 	fmt.Println("   Registering device with the server...")
@@ -93,6 +100,7 @@ func (a *Auth) Init(serverURL string) error {
 	// Save config
 	a.config.Device.ID = resp.DeviceID
 	a.config.Device.Name = deviceName
+	a.config.Device.UserName = userName
 	a.config.Device.Approved = resp.Status == protocol.DeviceStatusApproved
 
 	if err := a.config.Save(); err != nil {
@@ -107,7 +115,7 @@ func (a *Auth) Init(serverURL string) error {
 		fmt.Println("   ⏳ Device registered, awaiting approval")
 		fmt.Println()
 		fmt.Println("   An admin must approve this device on the server with:")
-		fmt.Printf("   zcloud-server admin devices approve %s\n", resp.DeviceID)
+		fmt.Printf("   zcloud-server admin devices approve %s --user %s\n", resp.DeviceID, userName)
 		fmt.Println()
 		fmt.Println("   Then run: zcloud init --complete")
 	} else if resp.Status == protocol.DeviceStatusApproved {
@@ -230,10 +238,22 @@ func (a *Auth) SetupTOTP(enrollmentCode string) error {
 
 	fmt.Println("   Configure your TOTP app (Google Authenticator, Aegis, etc.):")
 	fmt.Println()
+	if enrollResp.TOTPURL != "" {
+		fmt.Println("   Scan this QR code:")
+		qr, err := qrcode.New(enrollResp.TOTPURL, qrcode.Medium)
+		if err == nil {
+			qrStr := strings.TrimRight(qr.ToSmallString(false), "\n")
+			for _, line := range strings.Split(qrStr, "\n") {
+				fmt.Println("   " + line)
+			}
+			fmt.Println()
+		}
+	}
+
 	fmt.Printf("   Secret: %s\n", enrollResp.TOTPSecret)
 	fmt.Println()
 
-	if enrollResp.TOTPQR != "" {
+	if enrollResp.TOTPURL == "" && enrollResp.TOTPQR != "" {
 		fmt.Println("   (QR code available in base64 - use the manual secret above)")
 	}
 

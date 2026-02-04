@@ -23,13 +23,13 @@ type RegisterRequest struct {
 
 // RegisterResponse - respuesta al registro
 type RegisterResponse struct {
-	DeviceID  string       `json:"device_id"`
-	Status    DeviceStatus `json:"status"`
-	Message   string       `json:"message,omitempty"`
-	TOTPSecret string      `json:"totp_secret,omitempty"` // Solo cuando approved
-	TOTPQR     string      `json:"totp_qr,omitempty"`     // QR en base64
-	EnrollmentCode      string    `json:"enrollment_code,omitempty"`       // Solo cuando se genera un código de enrolamiento
-	EnrollmentExpiresAt time.Time `json:"enrollment_expires_at,omitempty"`  // Expiración del enrolamiento
+	DeviceID            string       `json:"device_id"`
+	Status              DeviceStatus `json:"status"`
+	Message             string       `json:"message,omitempty"`
+	TOTPSecret          string       `json:"totp_secret,omitempty"`           // Solo cuando approved
+	TOTPQR              string       `json:"totp_qr,omitempty"`               // QR en base64
+	EnrollmentCode      string       `json:"enrollment_code,omitempty"`       // Solo cuando se genera un código de enrolamiento
+	EnrollmentExpiresAt time.Time    `json:"enrollment_expires_at,omitempty"` // Expiración del enrolamiento
 }
 
 // LoginRequest - solicitud de login
@@ -42,7 +42,7 @@ type LoginRequest struct {
 
 // LoginResponse - respuesta al login
 type LoginResponse struct {
-	Token     string    `json:"token"`      // JWT
+	Token     string    `json:"token"` // JWT
 	ExpiresAt time.Time `json:"expires_at"`
 	Message   string    `json:"message,omitempty"`
 }
@@ -66,10 +66,10 @@ type NodeInfo struct {
 
 // SessionInfo - información de la sesión actual
 type SessionInfo struct {
-	DeviceID  string    `json:"device_id"`
-	DeviceName string   `json:"device_name"`
-	ExpiresAt time.Time `json:"expires_at"`
-	Valid     bool      `json:"valid"`
+	DeviceID   string    `json:"device_id"`
+	DeviceName string    `json:"device_name"`
+	ExpiresAt  time.Time `json:"expires_at"`
+	Valid      bool      `json:"valid"`
 }
 
 // DeviceInfo - información completa de un dispositivo (admin)
@@ -97,17 +97,18 @@ type ErrorResponse struct {
 // TOTPEnrollRequest - solicitud para obtener el secreto TOTP una sola vez (enrolamiento)
 // Nota: este endpoint se usa ANTES del login, así que se autentica con device key (firma) + código one-time.
 type TOTPEnrollRequest struct {
-	DeviceID        string `json:"device_id"`
-	Timestamp       int64  `json:"timestamp"`
-	Signature       string `json:"signature"`        // Firma del mensaje de enrolamiento con device key
-	EnrollmentCode  string `json:"enrollment_code"`  // Código one-time generado por admin
+	DeviceID       string `json:"device_id"`
+	Timestamp      int64  `json:"timestamp"`
+	Signature      string `json:"signature"`       // Firma del mensaje de enrolamiento con device key
+	EnrollmentCode string `json:"enrollment_code"` // Código one-time generado por admin
 }
 
 // TOTPEnrollResponse - respuesta al enrolamiento de TOTP
 type TOTPEnrollResponse struct {
-	Message   string `json:"message,omitempty"`
+	Message    string `json:"message,omitempty"`
 	TOTPSecret string `json:"totp_secret,omitempty"` // Solo se devuelve una vez por usuario
 	TOTPQR     string `json:"totp_qr,omitempty"`     // QR en base64 (opcional)
+	TOTPURL    string `json:"totp_url,omitempty"`    // otpauth:// URL (opcional)
 }
 
 // ApproveDeviceResponse - respuesta al aprobar un dispositivo (admin)

@@ -121,7 +121,7 @@ sudo make install-client
 ### First-time setup (client)
 
 ```bash
-# 1. Initialize client
+# 1. Initialize client (you'll be asked for a user/persona name)
 zcloud init https://api.zyrak.cloud
 
 # 2. On the SERVER, approve the device and assign it to a user/persona
@@ -145,6 +145,7 @@ source ~/.zshrc
 - TOTP is **per user/persona**, not per device.
 - When you approve a device, you assign it to a user with `--user <name>`.
 - The server generates a one-time **Enrollment code** so the user can fetch the TOTP secret **exactly once** in their terminal.
+- The client prints an ASCII QR code (plus the manual secret) during `zcloud totp`.
 - Once configured in your authenticator app (Google Authenticator, Aegis, etc.), you can approve more devices with the same `--user` and they can use `zcloud login` with the same TOTP.
 
 To rotate/reset a user's TOTP:
@@ -224,7 +225,7 @@ sudo systemctl status zcloud-server  # Verify it starts cleanly
 When you start the server for the first time, you need to approve the first device and make it admin:
 
 ```bash
-# 1. On the client, initialize and get the device_id
+# 1. On the client, initialize and get the device_id (you'll be asked for a user/persona name)
 zcloud init https://api.zyrak.cloud
 # Note the Device ID shown by the CLI
 

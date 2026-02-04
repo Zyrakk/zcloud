@@ -28,6 +28,7 @@ type ServerConfig struct {
 type DeviceConfig struct {
 	ID       string `yaml:"id"`
 	Name     string `yaml:"name"`
+	UserName string `yaml:"user_name,omitempty"` // User/persona name for approval hint
 	Approved bool   `yaml:"approved"`
 	Trusted  bool   `yaml:"trusted"` // Dispositivo de confianza (TOTP configurado)
 }

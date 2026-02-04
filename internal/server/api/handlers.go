@@ -25,10 +25,10 @@ import (
 
 // API representa el servidor API
 type API struct {
-	db           *db.Database
-	auth         *middleware.AuthMiddleware
-	config       *Config
-	auditLogger  *middleware.AuditLogger
+	db          *db.Database
+	auth        *middleware.AuthMiddleware
+	config      *Config
+	auditLogger *middleware.AuditLogger
 }
 
 // Config configuración de la API
@@ -51,10 +51,10 @@ func New(database *db.Database, config *Config) *API {
 	auditLogger := middleware.NewAuditLogger("info")
 
 	return &API{
-		db:           database,
-		auth:         auth,
-		config:       config,
-		auditLogger:  auditLogger,
+		db:          database,
+		auth:        auth,
+		config:      config,
+		auditLogger: auditLogger,
 	}
 }
 
@@ -210,8 +210,8 @@ func (a *API) handleRegister(w http.ResponseWriter, r *http.Request) {
 
 	// Respuesta
 	resp := &protocol.RegisterResponse{
-		DeviceID:   deviceID,
-		Status:     status,
+		DeviceID:            deviceID,
+		Status:              status,
 		EnrollmentCode:      enrollmentCode,
 		EnrollmentExpiresAt: enrollmentExpires,
 	}
@@ -858,6 +858,10 @@ func (a *API) handleTOTPEnroll(w http.ResponseWriter, r *http.Request) {
 		Issuer:      a.config.TOTPIssuer,
 		AccountName: accountName,
 	})
+	totpURL := crypto.GetTOTPURL(secret, crypto.TOTPConfig{
+		Issuer:      a.config.TOTPIssuer,
+		AccountName: accountName,
+	})
 
 	// Mark configured before returning the secret to enforce "only once" even under concurrent enrollments.
 	marked, err := a.db.MarkUserTOTPConfigured(userID)
@@ -877,6 +881,7 @@ func (a *API) handleTOTPEnroll(w http.ResponseWriter, r *http.Request) {
 		Message:    "TOTP enrollment successful",
 		TOTPSecret: secret,
 		TOTPQR:     qr,
+		TOTPURL:    totpURL,
 	}, http.StatusOK)
 }
 
