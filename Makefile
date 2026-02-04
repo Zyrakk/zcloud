@@ -1,6 +1,6 @@
 .PHONY: all build build-client build-server clean install-client install-server test
 
-VERSION := 2.0.0
+VERSION ?= $(shell if [ -f VERSION ]; then cat VERSION; else git describe --tags --abbrev=0 2>/dev/null || echo dev; fi)
 BUILD_TIME := $(shell date -u '+%Y-%m-%d_%H:%M:%S')
 LDFLAGS := -ldflags "-X main.Version=$(VERSION) -X main.BuildTime=$(BUILD_TIME)"
 
