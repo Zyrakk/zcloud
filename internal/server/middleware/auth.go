@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"strings"
 	"sync"
@@ -183,7 +184,7 @@ func NewRateLimiter(limit int, window time.Duration) *RateLimiter {
 // Limit middleware de rate limiting
 func (rl *RateLimiter) Limit(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		ip := r.RemoteAddr
+		ip := clientIP(r)
 
 		now := time.Now()
 		windowStart := now.Add(-rl.window)
@@ -214,6 +215,32 @@ func (rl *RateLimiter) Limit(next http.Handler) http.Handler {
 
 		next.ServeHTTP(w, r)
 	})
+}
+
+func clientIP(r *http.Request) string {
+	// Default: RemoteAddr without port.
+	host := r.RemoteAddr
+	if h, _, err := net.SplitHostPort(r.RemoteAddr); err == nil && h != "" {
+		host = h
+	}
+
+	// If running behind a local reverse proxy, RemoteAddr will be loopback.
+	// In that case it's safe/useful to honor X-Forwarded-For for rate limiting.
+	if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
+		xff := r.Header.Get("X-Forwarded-For")
+		if xff != "" {
+			// Take the left-most (original client) IP.
+			parts := strings.Split(xff, ",")
+			if len(parts) > 0 {
+				candidate := strings.TrimSpace(parts[0])
+				if net.ParseIP(candidate) != nil {
+					return candidate
+				}
+			}
+		}
+	}
+
+	return host
 }
 
 // CORS middleware para CORS

@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -78,13 +79,38 @@ func (s *SSHClient) Connect() error {
 
 	// Enviar tamaño inicial del terminal
 	lastWidth, lastHeight := s.getTermSize()
-	if err := s.sendTermSize(conn, lastWidth, lastHeight); err != nil {
-		return fmt.Errorf("failed to send terminal size: %w", err)
-	}
 
 	// Canales de control
 	done := make(chan struct{})
-	errChan := make(chan error, 2)
+	var closeOnce sync.Once
+	closeDone := func() { closeOnce.Do(func() { close(done) }) }
+	defer closeDone()
+	errChan := make(chan error, 3)
+
+	// Serialize all websocket writes through a single goroutine.
+	// Gorilla websocket requires one concurrent writer.
+	writeCh := make(chan protocol.SSHMessage, 64)
+	go func() {
+		for {
+			select {
+			case <-done:
+				return
+			case msg := <-writeCh:
+				if err := conn.WriteJSON(msg); err != nil {
+					errChan <- fmt.Errorf("websocket write error: %w", err)
+					closeDone()
+					return
+				}
+			}
+		}
+	}()
+
+	// Enviar tamaño inicial del terminal (via writer)
+	writeCh <- protocol.SSHMessage{
+		Type: protocol.SSHMessageResize,
+		Rows: uint16(lastHeight),
+		Cols: uint16(lastWidth),
+	}
 
 	// Goroutine: stdin -> WebSocket
 	go func() {
@@ -95,7 +121,7 @@ func (s *SSHClient) Connect() error {
 				if err != io.EOF {
 					errChan <- fmt.Errorf("stdin read error: %w", err)
 				}
-				close(done)
+				closeDone()
 				return
 			}
 			if n > 0 {
@@ -103,10 +129,10 @@ func (s *SSHClient) Connect() error {
 					Type: protocol.SSHMessageInput,
 					Data: buf[:n],
 				}
-				if err := conn.WriteJSON(msg); err != nil {
-					errChan <- fmt.Errorf("websocket write error: %w", err)
-					close(done)
+				select {
+				case <-done:
 					return
+				case writeCh <- msg:
 				}
 			}
 		}
@@ -120,7 +146,7 @@ func (s *SSHClient) Connect() error {
 				if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseNormalClosure) {
 					errChan <- fmt.Errorf("websocket read error: %w", err)
 				}
-				close(done)
+				closeDone()
 				return
 			}
 
@@ -129,10 +155,10 @@ func (s *SSHClient) Connect() error {
 				os.Stdout.Write(msg.Data)
 			case protocol.SSHMessageError:
 				fmt.Fprintf(os.Stderr, "\r\nError: %s\r\n", string(msg.Data))
-				close(done)
+				closeDone()
 				return
 			case protocol.SSHMessageClose:
-				close(done)
+				closeDone()
 				return
 			}
 		}
@@ -151,8 +177,14 @@ func (s *SSHClient) Connect() error {
 			width, height := s.getTermSize()
 			if width != lastWidth || height != lastHeight {
 				lastWidth, lastHeight = width, height
-				if err := s.sendTermSize(conn, width, height); err != nil {
-					return fmt.Errorf("failed to send resize: %w", err)
+				select {
+				case <-done:
+					return nil
+				case writeCh <- protocol.SSHMessage{
+					Type: protocol.SSHMessageResize,
+					Rows: uint16(height),
+					Cols: uint16(width),
+				}:
 				}
 			}
 		case err := <-errChan:
@@ -171,15 +203,7 @@ func (s *SSHClient) getTermSize() (int, int) {
 }
 
 // sendTermSize envía el tamaño actual del terminal
-func (s *SSHClient) sendTermSize(conn *websocket.Conn, width, height int) error {
-	msg := protocol.SSHMessage{
-		Type: protocol.SSHMessageResize,
-		Rows: uint16(height),
-		Cols: uint16(width),
-	}
-
-	return conn.WriteJSON(msg)
-}
+// sendTermSize removed: writes are serialized via writeCh in Connect().
 
 // getWSURL genera la URL WebSocket a partir de la URL HTTP
 func (s *SSHClient) getWSURL() (string, error) {

@@ -1,12 +1,15 @@
 package api
 
 import (
+	"bytes"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
+	"os"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -63,6 +66,7 @@ func (a *API) Router() http.Handler {
 	mux.HandleFunc("POST /api/v1/devices/register", a.handleRegister)
 	mux.HandleFunc("GET /api/v1/devices/status", a.handleDeviceStatus)
 	mux.HandleFunc("POST /api/v1/auth/login", a.handleLogin)
+	mux.HandleFunc("POST /api/v1/totp/enroll", a.handleTOTPEnroll)
 
 	// Rutas protegidas
 	protected := http.NewServeMux()
@@ -152,15 +156,36 @@ func (a *API) handleRegister(w http.ResponseWriter, r *http.Request) {
 		status = protocol.DeviceStatusPending
 	}
 
-	// Generar TOTP si está aprobado automáticamente
-	var totpSecret, totpQR string
+	// En modo auto-approval, creamos un "usuario" por defecto para este dispositivo y emitimos
+	// un código de enrolamiento one-time para que el usuario obtenga el secreto en su terminal.
+	var (
+		userID             string
+		userName           string
+		enrollmentCode     string
+		enrollmentExpires  time.Time
+		totpSecretForStore string
+	)
 	if status == protocol.DeviceStatusApproved {
-		totpSecret, totpQR, err = crypto.GenerateTOTP(crypto.TOTPConfig{
+		userID = uuid.New().String()
+		// Make user name unique to avoid collisions when auto-approving.
+		userName = fmt.Sprintf("%s-%s", req.DeviceName, deviceID[:6])
+		totpSecretForStore, _, err = crypto.GenerateTOTP(crypto.TOTPConfig{
 			Issuer:      a.config.TOTPIssuer,
-			AccountName: req.DeviceName,
+			AccountName: userName,
 		})
 		if err != nil {
 			a.jsonError(w, "failed to generate TOTP", http.StatusInternalServerError)
+			return
+		}
+		if err := a.db.CreateUser(userID, userName, totpSecretForStore); err != nil {
+			a.jsonError(w, "failed to create user", http.StatusInternalServerError)
+			return
+		}
+
+		enrollmentCode = generateEnrollmentCode()
+		enrollmentExpires = time.Now().Add(10 * time.Minute)
+		if err := a.db.CreateTOTPEnrollment(hashEnrollmentCode(enrollmentCode), deviceID, userID, enrollmentExpires); err != nil {
+			a.jsonError(w, "failed to create enrollment code", http.StatusInternalServerError)
 			return
 		}
 	}
@@ -168,6 +193,7 @@ func (a *API) handleRegister(w http.ResponseWriter, r *http.Request) {
 	// Crear dispositivo
 	device := &protocol.DeviceInfo{
 		ID:        deviceID,
+		UserID:    userID,
 		Name:      req.DeviceName,
 		PublicKey: req.PublicKey,
 		Hostname:  req.Hostname,
@@ -176,7 +202,8 @@ func (a *API) handleRegister(w http.ResponseWriter, r *http.Request) {
 		CreatedAt: time.Now(),
 	}
 
-	if err := a.db.CreateDevice(device, totpSecret); err != nil {
+	// totp_secret in devices is legacy; for the new model we store it in users.
+	if err := a.db.CreateDevice(device, ""); err != nil {
 		a.jsonError(w, "failed to create device", http.StatusInternalServerError)
 		return
 	}
@@ -185,8 +212,8 @@ func (a *API) handleRegister(w http.ResponseWriter, r *http.Request) {
 	resp := &protocol.RegisterResponse{
 		DeviceID:   deviceID,
 		Status:     status,
-		TOTPSecret: totpSecret,
-		TOTPQR:     totpQR,
+		EnrollmentCode:      enrollmentCode,
+		EnrollmentExpiresAt: enrollmentExpires,
 	}
 
 	if status == protocol.DeviceStatusPending {
@@ -222,19 +249,6 @@ func (a *API) handleDeviceStatus(w http.ResponseWriter, r *http.Request) {
 	resp := &protocol.RegisterResponse{
 		DeviceID: device.ID,
 		Status:   device.Status,
-	}
-
-	// Si está aprobado, incluir TOTP si no lo tiene configurado
-	if device.Status == protocol.DeviceStatusApproved {
-		totpSecret, err := a.db.GetTOTPSecret(deviceID)
-		if err == nil && totpSecret != "" {
-			resp.TOTPSecret = totpSecret
-			// Generar QR del secreto existente (no regenerar secreto)
-			resp.TOTPQR, _ = crypto.GenerateTOTPQRFromSecret(totpSecret, crypto.TOTPConfig{
-				Issuer:      a.config.TOTPIssuer,
-				AccountName: device.Name,
-			})
-		}
 	}
 
 	a.jsonResponse(w, resp, http.StatusOK)
@@ -276,9 +290,26 @@ func (a *API) handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Verificar TOTP
-	totpSecret, err := a.db.GetTOTPSecret(req.DeviceID)
-	if err != nil || totpSecret == "" {
-		a.jsonError(w, "TOTP not configured", http.StatusInternalServerError)
+	var totpSecret string
+	if device.UserID != "" {
+		secret, _, err := a.db.GetUserTOTPSecret(device.UserID)
+		if err != nil {
+			a.jsonError(w, "failed to get user TOTP", http.StatusInternalServerError)
+			return
+		}
+		totpSecret = secret
+	} else {
+		// Legacy fallback (older DBs / flows).
+		secret, err := a.db.GetTOTPSecret(req.DeviceID)
+		if err != nil {
+			a.jsonError(w, "failed to get TOTP", http.StatusInternalServerError)
+			return
+		}
+		totpSecret = secret
+	}
+
+	if totpSecret == "" {
+		a.jsonError(w, "TOTP not configured", http.StatusForbidden)
 		return
 	}
 
@@ -430,17 +461,8 @@ func (a *API) handleApply(w http.ResponseWriter, r *http.Request) {
 	var results []protocol.ApplyResult
 
 	for _, manifest := range req.Manifests {
-		// Crear archivo temporal
-		tmpFile := fmt.Sprintf("/tmp/zcloud-manifest-%s.yaml", uuid.New().String()[:8])
-		if err := exec.Command("sh", "-c", fmt.Sprintf("cat > %s << 'EOF'\n%s\nEOF", tmpFile, manifest)).Run(); err != nil {
-			results = append(results, protocol.ApplyResult{
-				Error: fmt.Sprintf("failed to write manifest: %v", err),
-			})
-			continue
-		}
-
-		// Aplicar manifest
-		args := []string{"--kubeconfig", a.config.KubeconfigPath, "apply", "-f", tmpFile}
+		// Apply manifests via stdin to avoid shell injection / temp file issues.
+		args := []string{"--kubeconfig", a.config.KubeconfigPath, "apply", "-f", "-"}
 		if req.Namespace != "" {
 			args = append(args, "-n", req.Namespace)
 		}
@@ -449,10 +471,8 @@ func (a *API) handleApply(w http.ResponseWriter, r *http.Request) {
 		}
 
 		cmd := exec.Command("kubectl", args...)
+		cmd.Stdin = bytes.NewBufferString(manifest + "\n")
 		output, err := cmd.CombinedOutput()
-
-		// Limpiar archivo temporal
-		exec.Command("rm", "-f", tmpFile).Run()
 
 		if err != nil {
 			results = append(results, protocol.ApplyResult{
@@ -521,29 +541,41 @@ func (a *API) handleExec(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Ejecutar comando
+	// Execute command with a controlled environment (ensure KUBECONFIG for k8s tooling).
 	cmd := exec.Command(req.Command, req.Args...)
 	if req.WorkDir != "" {
 		cmd.Dir = req.WorkDir
 	}
 
-	stdout, err := cmd.Output()
-	stderr := ""
-	exitCode := 0
+	env := os.Environ()
+	if a.config.KubeconfigPath != "" {
+		// Force tools to use the server's kubeconfig unless they explicitly override it.
+		env = append(env, "KUBECONFIG="+a.config.KubeconfigPath)
+	}
+	cmd.Env = env
 
+	// Capture stdout/stderr reliably (even on success).
+	var stdoutBuf, stderrBuf bytes.Buffer
+	cmd.Stdout = &stdoutBuf
+	cmd.Stderr = &stderrBuf
+
+	err := cmd.Run()
+	exitCode := 0
 	if err != nil {
 		if exitErr, ok := err.(*exec.ExitError); ok {
-			stderr = string(exitErr.Stderr)
 			exitCode = exitErr.ExitCode()
 		} else {
-			stderr = err.Error()
 			exitCode = 1
+			// Preserve the error string if the process didn't run at all.
+			if stderrBuf.Len() == 0 {
+				stderrBuf.WriteString(err.Error())
+			}
 		}
 	}
 
 	resp := &protocol.ExecResponse{
-		Stdout:   string(stdout),
-		Stderr:   stderr,
+		Stdout:   stdoutBuf.String(),
+		Stderr:   stderrBuf.String(),
 		ExitCode: exitCode,
 	}
 
@@ -580,13 +612,44 @@ func (a *API) handleApproveDevice(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Generar TOTP
-	totpSecret, _, err := crypto.GenerateTOTP(crypto.TOTPConfig{
-		Issuer:      a.config.TOTPIssuer,
-		AccountName: device.Name,
-	})
+	// Determine the "persona" (user) this device belongs to.
+	// Accept query param ?user=... or JSON body {"user":"..."}; fallback to device name.
+	userName := strings.TrimSpace(r.URL.Query().Get("user"))
+	if userName == "" {
+		var body struct {
+			User string `json:"user"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		userName = strings.TrimSpace(body.User)
+	}
+	if userName == "" {
+		userName = device.Name
+	}
+
+	// Ensure user exists (create with TOTP secret if missing).
+	u, err := a.db.GetUserByName(userName)
 	if err != nil {
-		a.jsonError(w, "failed to generate TOTP", http.StatusInternalServerError)
+		a.jsonError(w, "failed to load user", http.StatusInternalServerError)
+		return
+	}
+	if u == nil {
+		userID := uuid.New().String()
+		secret, _, err := crypto.GenerateTOTP(crypto.TOTPConfig{
+			Issuer:      a.config.TOTPIssuer,
+			AccountName: userName,
+		})
+		if err != nil {
+			a.jsonError(w, "failed to generate TOTP", http.StatusInternalServerError)
+			return
+		}
+		if err := a.db.CreateUser(userID, userName, secret); err != nil {
+			a.jsonError(w, "failed to create user", http.StatusInternalServerError)
+			return
+		}
+		u, _ = a.db.GetUser(userID)
+	}
+	if u == nil {
+		a.jsonError(w, "failed to resolve user", http.StatusInternalServerError)
 		return
 	}
 
@@ -596,8 +659,17 @@ func (a *API) handleApproveDevice(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := a.db.UpdateDeviceTOTP(deviceID, totpSecret); err != nil {
-		a.jsonError(w, "failed to update TOTP", http.StatusInternalServerError)
+	// Assign device to user for per-person TOTP.
+	if err := a.db.SetDeviceUserID(deviceID, u.ID); err != nil {
+		a.jsonError(w, "failed to assign device to user", http.StatusInternalServerError)
+		return
+	}
+
+	// Create a one-time enrollment code for the user to retrieve the secret on their terminal.
+	enrollmentCode := generateEnrollmentCode()
+	enrollmentExpires := time.Now().Add(10 * time.Minute)
+	if err := a.db.CreateTOTPEnrollment(hashEnrollmentCode(enrollmentCode), deviceID, u.ID, enrollmentExpires); err != nil {
+		a.jsonError(w, "failed to create enrollment code", http.StatusInternalServerError)
 		return
 	}
 
@@ -607,7 +679,13 @@ func (a *API) handleApproveDevice(w http.ResponseWriter, r *http.Request) {
 	approveIP := r.RemoteAddr
 	a.auditLogger.LogAudit("device_approved", deviceID, fmt.Sprintf("name=%s ip=%s", device.Name, approveIP))
 
-	a.jsonResponse(w, map[string]string{"message": "Device approved"}, http.StatusOK)
+	a.jsonResponse(w, &protocol.ApproveDeviceResponse{
+		Message:             "Device approved",
+		UserID:              u.ID,
+		UserName:            u.Name,
+		EnrollmentCode:      enrollmentCode,
+		EnrollmentExpiresAt: enrollmentExpires,
+	}, http.StatusOK)
 }
 
 func (a *API) handleRevokeDevice(w http.ResponseWriter, r *http.Request) {
@@ -701,4 +779,128 @@ func generateDeviceID(publicKey string) string {
 func hashToken(token string) string {
 	hash := sha256.Sum256([]byte(token))
 	return hex.EncodeToString(hash[:])
+}
+
+// handleTOTPEnroll returns the TOTP secret to the user exactly once (per user),
+// after validating a one-time enrollment code and a device-key signature.
+func (a *API) handleTOTPEnroll(w http.ResponseWriter, r *http.Request) {
+	var req protocol.TOTPEnrollRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		a.jsonError(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	if req.DeviceID == "" || req.EnrollmentCode == "" || req.Signature == "" || req.Timestamp == 0 {
+		a.jsonError(w, "device_id, enrollment_code, timestamp and signature are required", http.StatusBadRequest)
+		return
+	}
+
+	// Timestamp window to reduce replay risk.
+	now := time.Now().Unix()
+	if req.Timestamp < now-300 || req.Timestamp > now+60 {
+		a.jsonError(w, "invalid timestamp", http.StatusUnauthorized)
+		return
+	}
+
+	device, err := a.db.GetDevice(req.DeviceID)
+	if err != nil || device == nil {
+		a.jsonError(w, "device not found", http.StatusUnauthorized)
+		return
+	}
+	if device.Status != protocol.DeviceStatusApproved {
+		a.jsonError(w, "device not approved", http.StatusForbidden)
+		return
+	}
+
+	// Bind signature to enrollment code to avoid signature reuse with other codes.
+	message := fmt.Sprintf("totp_enroll:%d:%s", req.Timestamp, req.EnrollmentCode)
+	valid, err := crypto.VerifySignature(device.PublicKey, message, req.Signature)
+	if err != nil || !valid {
+		a.jsonError(w, "invalid signature", http.StatusUnauthorized)
+		return
+	}
+
+	// Consume enrollment code (one-time), fetch user, and optionally mark TOTP configured.
+	userID, err := a.db.ConsumeTOTPEnrollment(hashEnrollmentCode(req.EnrollmentCode), req.DeviceID)
+	if err != nil {
+		a.jsonError(w, err.Error(), http.StatusForbidden)
+		return
+	}
+
+	// Ensure device is linked to the user (idempotent).
+	if device.UserID == "" {
+		_ = a.db.SetDeviceUserID(req.DeviceID, userID)
+	}
+
+	secret, configured, err := a.db.GetUserTOTPSecret(userID)
+	if err != nil {
+		a.jsonError(w, "failed to load user TOTP", http.StatusInternalServerError)
+		return
+	}
+	if secret == "" {
+		a.jsonError(w, "TOTP not configured for user", http.StatusForbidden)
+		return
+	}
+
+	// If already configured, do not return the secret again.
+	if configured {
+		a.jsonResponse(w, &protocol.TOTPEnrollResponse{
+			Message: "TOTP already configured for this user",
+		}, http.StatusOK)
+		return
+	}
+
+	accountName := "zcloud"
+	if u, err := a.db.GetUser(userID); err == nil && u != nil && u.Name != "" {
+		accountName = u.Name
+	}
+	qr, _ := crypto.GenerateTOTPQRFromSecret(secret, crypto.TOTPConfig{
+		Issuer:      a.config.TOTPIssuer,
+		AccountName: accountName,
+	})
+
+	// Mark configured before returning the secret to enforce "only once" even under concurrent enrollments.
+	marked, err := a.db.MarkUserTOTPConfigured(userID)
+	if err != nil {
+		a.jsonError(w, "failed to finalize enrollment", http.StatusInternalServerError)
+		return
+	}
+	if !marked {
+		// Someone else configured concurrently; do not return the secret again.
+		a.jsonResponse(w, &protocol.TOTPEnrollResponse{
+			Message: "TOTP already configured for this user",
+		}, http.StatusOK)
+		return
+	}
+
+	a.jsonResponse(w, &protocol.TOTPEnrollResponse{
+		Message:    "TOTP enrollment successful",
+		TOTPSecret: secret,
+		TOTPQR:     qr,
+	}, http.StatusOK)
+}
+
+func hashEnrollmentCode(code string) string {
+	sum := sha256.Sum256([]byte(strings.TrimSpace(code)))
+	return hex.EncodeToString(sum[:])
+}
+
+func generateEnrollmentCode() string {
+	// Human-friendly alphabet (no 0/O, 1/I) for manual typing.
+	const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+	const n = 12
+
+	var b [n]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		// Extremely unlikely; fallback to uuid segment (still ok).
+		return strings.ToUpper(strings.ReplaceAll(uuid.New().String()[:12], "-", ""))
+	}
+
+	out := make([]byte, n)
+	for i := 0; i < n; i++ {
+		out[i] = alphabet[int(b[i])%len(alphabet)]
+	}
+
+	// Group as XXXX-XXXX-XXXX
+	return fmt.Sprintf("%s-%s-%s", out[0:4], out[4:8], out[8:12])
 }

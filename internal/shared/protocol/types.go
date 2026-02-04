@@ -2,6 +2,8 @@ package protocol
 
 import "time"
 
+// ================== Core Types ==================
+
 // DeviceStatus representa el estado de un dispositivo
 type DeviceStatus string
 
@@ -26,6 +28,8 @@ type RegisterResponse struct {
 	Message   string       `json:"message,omitempty"`
 	TOTPSecret string      `json:"totp_secret,omitempty"` // Solo cuando approved
 	TOTPQR     string      `json:"totp_qr,omitempty"`     // QR en base64
+	EnrollmentCode      string    `json:"enrollment_code,omitempty"`       // Solo cuando se genera un código de enrolamiento
+	EnrollmentExpiresAt time.Time `json:"enrollment_expires_at,omitempty"`  // Expiración del enrolamiento
 }
 
 // LoginRequest - solicitud de login
@@ -71,6 +75,7 @@ type SessionInfo struct {
 // DeviceInfo - información completa de un dispositivo (admin)
 type DeviceInfo struct {
 	ID         string       `json:"id"`
+	UserID     string       `json:"user_id,omitempty"`
 	Name       string       `json:"name"`
 	PublicKey  string       `json:"public_key"`
 	Hostname   string       `json:"hostname"`
@@ -85,6 +90,33 @@ type ErrorResponse struct {
 	Error   string `json:"error"`
 	Code    string `json:"code,omitempty"`
 	Details string `json:"details,omitempty"`
+}
+
+// ================== TOTP Enrollment ==================
+
+// TOTPEnrollRequest - solicitud para obtener el secreto TOTP una sola vez (enrolamiento)
+// Nota: este endpoint se usa ANTES del login, así que se autentica con device key (firma) + código one-time.
+type TOTPEnrollRequest struct {
+	DeviceID        string `json:"device_id"`
+	Timestamp       int64  `json:"timestamp"`
+	Signature       string `json:"signature"`        // Firma del mensaje de enrolamiento con device key
+	EnrollmentCode  string `json:"enrollment_code"`  // Código one-time generado por admin
+}
+
+// TOTPEnrollResponse - respuesta al enrolamiento de TOTP
+type TOTPEnrollResponse struct {
+	Message   string `json:"message,omitempty"`
+	TOTPSecret string `json:"totp_secret,omitempty"` // Solo se devuelve una vez por usuario
+	TOTPQR     string `json:"totp_qr,omitempty"`     // QR en base64 (opcional)
+}
+
+// ApproveDeviceResponse - respuesta al aprobar un dispositivo (admin)
+type ApproveDeviceResponse struct {
+	Message             string    `json:"message"`
+	UserID              string    `json:"user_id,omitempty"`
+	UserName            string    `json:"user_name,omitempty"`
+	EnrollmentCode      string    `json:"enrollment_code,omitempty"`
+	EnrollmentExpiresAt time.Time `json:"enrollment_expires_at,omitempty"`
 }
 
 // ApplyRequest - solicitud para aplicar manifests

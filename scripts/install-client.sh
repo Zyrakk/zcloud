@@ -1,7 +1,7 @@
 #!/bin/bash
 #===============================================================================
 # ZCLOUD CLIENT INSTALLER
-# Instala el cliente zcloud en cualquier Linux
+# Installs the zcloud client on (most) Linux systems
 #
 # USO: curl -fsSL https://api.zyrak.cloud/install.sh | bash
 #===============================================================================
@@ -41,14 +41,14 @@ detect_os() {
 
 main() {
     echo ""
-    echo -e "${BLUE}🔧 Instalando zcloud client...${NC}"
+    echo -e "${BLUE}🔧 Installing zcloud client...${NC}"
     echo ""
     
     OS=$(detect_os)
     ARCH=$(detect_arch)
     
     if [[ "$OS" == "unsupported" ]] || [[ "$ARCH" == "unsupported" ]]; then
-        echo "❌ Sistema no soportado: $(uname -s) $(uname -m)"
+        echo "❌ Unsupported system: $(uname -s) $(uname -m)"
         exit 1
     fi
     
@@ -64,21 +64,21 @@ main() {
     trap "rm -rf $TMP_DIR" EXIT
     
     # Descargar
-    echo -e "${BLUE}📥 Descargando ${BINARY}...${NC}"
+    echo -e "${BLUE}📥 Downloading ${BINARY}...${NC}"
     
     if command -v curl &>/dev/null; then
         curl -fsSL -o "${TMP_DIR}/${BINARY_NAME}" "${DOWNLOAD_URL}"
     elif command -v wget &>/dev/null; then
         wget -q -O "${TMP_DIR}/${BINARY_NAME}" "${DOWNLOAD_URL}"
     else
-        echo "❌ Se requiere curl o wget"
+        echo "❌ curl or wget is required"
         exit 1
     fi
     
     chmod +x "${TMP_DIR}/${BINARY_NAME}"
     
     # Instalar
-    echo -e "${BLUE}📦 Instalando en ${INSTALL_DIR}...${NC}"
+    echo -e "${BLUE}📦 Installing to ${INSTALL_DIR}...${NC}"
     
     if [[ -w "${INSTALL_DIR}" ]]; then
         mv "${TMP_DIR}/${BINARY_NAME}" "${INSTALL_DIR}/${BINARY_NAME}"
@@ -87,22 +87,22 @@ main() {
     fi
     
     echo ""
-    echo -e "${GREEN}✅ zcloud instalado correctamente${NC}"
+    echo -e "${GREEN}✅ zcloud installed successfully${NC}"
     echo ""
-    echo "   Ubicación: ${INSTALL_DIR}/${BINARY_NAME}"
-    echo "   Versión:   $(zcloud version 2>/dev/null || echo 'desconocida')"
+    echo "   Location: ${INSTALL_DIR}/${BINARY_NAME}"
+    echo "   Version:  $(zcloud version 2>/dev/null || echo 'unknown')"
     echo ""
-    echo -e "${YELLOW}Próximos pasos:${NC}"
+    echo -e "${YELLOW}Next steps:${NC}"
     echo ""
-    echo "   1. Inicializa el cliente:"
+    echo "   1. Initialize the client:"
     echo "      zcloud init https://api.zyrak.cloud"
     echo ""
-    echo "   2. Espera la aprobación del administrador"
+    echo "   2. Wait for admin approval"
     echo ""
-    echo "   3. Completa la configuración:"
+    echo "   3. Complete setup:"
     echo "      zcloud init --complete"
     echo ""
-    echo "   4. Inicia sesión:"
+    echo "   4. Login:"
     echo "      zcloud login"
     echo ""
 }

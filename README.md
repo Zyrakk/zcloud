@@ -1,16 +1,16 @@
 # ZCloud CLI
 
-Sistema de gestión remota para clusters k3s. Permite conectarte y administrar tu homelab desde cualquier lugar de forma segura.
+Remote management system for k3s clusters. It lets you connect to and operate your homelab securely from anywhere.
 
-## 🏗️ Arquitectura
+## 🏗️ Architecture
 
 ```
 ┌─────────────────────────────┐          ┌─────────────────────────────┐
-│  CLIENTE (cualquier Linux)  │          │  SERVIDOR (N150)            │
+│  CLIENT (any Linux)         │          │  SERVER (N150)              │
 │                             │          │                             │
 │  zcloud CLI                 │  HTTPS   │  zcloud-server              │
-│  - Device keys (Ed25519)    │◄────────►│  - API REST                 │
-│  - TOTP 2FA                 │   :443   │  - JWT sessions             │
+│  - Device keys (Ed25519)    │◄────────►│  - REST API                 │
+│  - TOTP (per user)          │   :443   │  - JWT sessions             │
 │  - kubectl proxy            │          │  - kubectl proxy            │
 │                             │          │  - Device management        │
 └─────────────────────────────┘          └──────────┬──────────────────┘
@@ -18,80 +18,84 @@ Sistema de gestión remota para clusters k3s. Permite conectarte y administrar t
                                                     ▼
                                          ┌─────────────────────┐
                                          │  k3s cluster        │
-                                         │  (4 nodos via VPN)  │
+                                         │  (4 nodes via VPN)  │
                                          └─────────────────────┘
 ```
 
-## 🔐 Seguridad
+## 🔐 Security
 
-| Capa | Mecanismo | Propósito |
-|------|-----------|-----------|
-| 1 | TLS 1.3 | Cifrado en tránsito |
-| 2 | Device Key (Ed25519) | Identifica el dispositivo |
-| 3 | TOTP | Verifica que es el usuario |
-| 4 | JWT (12h TTL) | Sesión temporal |
-| 5 | Token Revocation | Invalidación inmediata de sesiones |
-| 6 | Security Headers | Protección XSS, clickjacking, etc. |
-| 7 | Rate limiting | Previene ataques |
-| 8 | Audit Logging | Rastro de seguridad |
+| Layer | Mechanism | Purpose |
+|------|-----------|---------|
+| 1 | TLS 1.3 | Encryption in transit |
+| 2 | Device Key (Ed25519) | Identifies the device |
+| 3 | TOTP | Proves the user is present |
+| 4 | JWT (12h TTL) | Temporary session |
+| 5 | Token Revocation | Immediate session invalidation |
+| 6 | Security Headers | XSS/clickjacking mitigation, etc. |
+| 7 | Rate limiting | Abuse prevention |
+| 8 | Audit Logging | Security trail |
+
+Notes:
+- The **TOTP secret is not exposed** via public endpoints. The user receives it **exactly once** using a one-time *Enrollment code* plus a device-key signature.
+- Rate limiting is applied per **IP** (not `IP:port`). If the server is behind a local reverse proxy (loopback), `X-Forwarded-For` is used to rate-limit per client.
 
 ### Token Revocation
 
-ZCloud incluye un sistema de revocación de tokens JWT que permite invalidar sesiones inmediatamente:
+ZCloud includes a JWT token revocation system to invalidate sessions immediately:
 
-- **Logout explícito**: Los tokens se revocan al ejecutar `zcloud stop`
-- **Revocación de dispositivo**: Todos los tokens de un dispositivo se revocan al revocarlo
-- **Blacklist automático**: Sistema de blacklist para tokens revocados
-- **Limpieza automática**: Tokens revocados expirados se eliminan automáticamente
+- **Explicit logout**: tokens are revoked when running `zcloud logout`
+- **Device revocation**: all tokens for a device are revoked when the device is revoked
+- **Automatic blacklist**: revoked tokens are blacklisted
+- **Automatic cleanup**: expired revoked tokens are removed
 
-Esto garantiza que los tokens no pueden ser reutilizados después de un logout o revocación, mejorando significativamente la seguridad.
+This prevents token reuse after logout/revocation and improves overall security.
 
 ### Security Headers
 
-ZCloud implementa headers de seguridad HTTP para proteger contra ataques comunes:
+ZCloud sets HTTP security headers to protect against common attacks:
 
-- **Content-Security-Policy (CSP)**: Previene ataques XSS
-- **X-Frame-Options: DENY**: Previene clickjacking
-- **X-Content-Type-Options: nosniff**: Previene MIME-sniffing
-- **X-XSS-Protection**: Protección XSS adicional
-- **Strict-Transport-Security (HSTS)**: Previene downgrade HTTPS
-- **Referrer-Policy**: Privacidad de referer
-- **Permissions-Policy**: Control de características del navegador
+- **Content-Security-Policy (CSP)**: mitigates XSS
+- **X-Frame-Options: DENY**: mitigates clickjacking
+- **X-Content-Type-Options: nosniff**: mitigates MIME sniffing
+- **X-XSS-Protection**: additional XSS protection
+- **Strict-Transport-Security (HSTS)**: mitigates HTTPS downgrade
+- **Referrer-Policy**: referrer privacy
+- **Permissions-Policy**: browser feature control
 
 ### TLS Verification
 
-ZCloud ahora valida correctamente los certificados TLS del cluster k3s:
+ZCloud validates TLS certificates correctly when talking to the k3s API:
 
-- **Verificación de CA**: Utiliza certificados CA válidos en lugar de `InsecureSkipVerify`
-- **Soporte para CA personalizada**: Configurable vía `kubernetes.ca_cert`
-- **Autodetección**: Descubre CA del kubeconfig si no se especifica
-- **Seguridad**: Previene ataques MITM en la comunicación con k3s
+- **CA verification**: uses valid CA certs instead of `InsecureSkipVerify`
+- **Custom CA support**: configurable via `kubernetes.ca_cert`
+- **Autodetection**: extracts CA from kubeconfig if not explicitly set
+- **Security**: mitigates MITM for k3s communication
 
 ### Audit Logging
 
-ZCloud registra eventos de seguridad importantes para auditoría:
+ZCloud logs important security events for auditing:
 
-- **Eventos registrados**: Registro de dispositivos, login, logout, aprobación, revocación
-- **Configurable**: Nivel de log ajustable (debug/info/warn/error/disabled)
-- **Timestamped**: Todos los eventos incluyen fecha/hora precisa
-- **Detalles**: Incluye device ID, IP y detalles adicionales
+- **Events**: device registration, login, logout, approval, revocation
+- **Configurable**: log level (debug/info/warn/error/disabled)
+- **Timestamped**: every entry includes a precise timestamp
+- **Details**: includes device ID, IP, and extra metadata
 
-Ejemplo de logs:
+Example logs:
 ```
 [2025-01-30 14:30:00] AUDIT: device_registered device=a1b2c3d4e5f6 details=name=my-laptop
 [2025-01-30 14:30:15] AUDIT: login_success device=a1b2c3d4e5f6 details=ip=192.168.1.100
 [2025-01-30 14:45:22] AUDIT: logout device=a1b2c3d4e5f6 details=ip=192.168.1.100
 ```
 
-## 📦 Instalación
+## 📦 Installation
 
-### Servidor (N150)
+### Server (N150)
 
 ```bash
-# Opción 1: Script de instalación
+# Option 1: installer script
 curl -fsSL https://api.zyrak.cloud/install-server.sh | sudo bash
 
-# Opción 2: Manual
+# Option 2: manual
 git clone https://github.com/zyrak/zcloud
 cd zcloud
 make build-server
@@ -99,95 +103,112 @@ sudo make install-server
 sudo /opt/zcloud-server/zcloud-server --init
 ```
 
-### Cliente (cualquier Linux)
+### Client (any Linux)
 
 ```bash
-# Opción 1: Script de instalación
+# Option 1: installer script
 curl -fsSL https://api.zyrak.cloud/install.sh | bash
 
-# Opción 2: Manual
+# Option 2: manual
 git clone https://github.com/zyrak/zcloud
 cd zcloud
 make build-client
 sudo make install-client
 ```
 
-## 🚀 Uso
+## 🚀 Usage
 
-### Primera configuración (cliente)
+### First-time setup (client)
 
 ```bash
-# 1. Inicializar cliente
+# 1. Initialize client
 zcloud init https://api.zyrak.cloud
 
-# 2. En el SERVIDOR, aprobar el dispositivo
-zcloud-server admin devices approve <device_id>
+# 2. On the SERVER, approve the device and assign it to a user/persona
+#    (so multiple devices can share the same TOTP)
+zcloud-server admin devices approve <device_id> --user stefan
+# This prints an "Enrollment code" (one-time, expires in ~10 minutes)
 
-# 3. En el cliente, verificar aprobación
+# 3. On the client, confirm approval
 zcloud init --complete
 
-# 4. Configurar TOTP
-zcloud totp
+# 4. Configure TOTP (only once per user/persona)
+zcloud totp ABCD-EFGH-IJKL
 
-# 5. Configurar shell (añadir a ~/.zshrc o ~/.bashrc)
+# 5. Configure shell (add to ~/.zshrc or ~/.bashrc)
 echo 'export KUBECONFIG="$HOME/.zcloud/kubeconfig:$KUBECONFIG"' >> ~/.zshrc
 source ~/.zshrc
 ```
 
-### Uso diario
+### TOTP Per User (1 code for all your devices)
+
+- TOTP is **per user/persona**, not per device.
+- When you approve a device, you assign it to a user with `--user <name>`.
+- The server generates a one-time **Enrollment code** so the user can fetch the TOTP secret **exactly once** in their terminal.
+- Once configured in your authenticator app (Google Authenticator, Aegis, etc.), you can approve more devices with the same `--user` and they can use `zcloud login` with the same TOTP.
+
+To rotate/reset a user's TOTP:
 
 ```bash
-# Iniciar sesión (una vez al día, pide TOTP)
-zcloud start
+zcloud-server admin users rotate <user_name> --device <device_id>
+# This prints a new Enrollment code; the user applies it with:
+zcloud totp ABCD-EFGH-IJKL
+```
 
-# Ahora puedes usar kubectl directamente!
+### Daily use
+
+```bash
+# Start a session (once per day, prompts for TOTP)
+zcloud login
+
+# Now you can use kubectl directly!
 kubectl get pods -A
 kubectl get nodes
 kubectl describe pod <pod>
 
-# También funciona el proxy interno
+# The internal proxy also works
 zcloud k get pods -A
 
-# Estado del cluster y sesión
+# Cluster/session status
 zcloud status
 
-# Aplicar manifests
+# Apply manifests
 zcloud apply ./deployment.yaml
 zcloud apply ./k8s/
 
-# Cerrar sesión (opcional)
-zcloud stop
+# Logout (optional)
+zcloud logout
 ```
 
-> 💡 **Powerlevel10k**: Después de `zcloud start`, tu prompt mostrará `☸ zcloud-homelab`
+> 💡 **Powerlevel10k**: after `zcloud login`, your prompt will show `☸ zcloud-homelab`
 
-### Administración
+### Administration (from a client with an admin session)
 
 ```bash
-# Listar dispositivos
+# List devices
 zcloud admin devices list
 
-# Aprobar dispositivo pendiente
-zcloud admin devices approve <device_id>
+# Approve a pending device (and assign it to a user/persona for shared TOTP)
+zcloud admin devices approve <device_id> --user stefan
 
-# Revocar dispositivo
+# Revoke a device
 zcloud admin devices revoke <device_id>
 ```
 
-### 🔄 Actualización del binario
+### 🔄 Binary updates
 
-Cuando hay nuevas versiones disponibles, sigue estos pasos para actualizar:
+When new versions are available, update like this:
 
-**Cliente (cualquier Linux):**
+**Client (any Linux):**
 ```bash
-cd ~/Git_Repos/zcloud  # O donde tengas el repositorio
+cd ~/Git_Repos/zcloud  # Or wherever you cloned it
 git pull
 make build-client
 sudo cp dist/zcloud-linux-amd64 /usr/local/bin/zcloud
-zcloud status  # Verificar que funciona
+zcloud status  # Sanity check
 ```
 
-**Servidor (N150):**
+**Server (N150):**
 ```bash
 cd ~/Git_Repos/zcloud
 git pull
@@ -195,63 +216,65 @@ make build-server
 sudo systemctl stop zcloud-server
 sudo cp dist/zcloud-server-linux-amd64 /opt/zcloud-server/zcloud-server
 sudo systemctl start zcloud-server
-sudo systemctl status zcloud-server  # Verificar que arranca bien
+sudo systemctl status zcloud-server  # Verify it starts cleanly
 ```
 
-### 🔑 Primera autorización de dispositivo
+### 🔑 First device bootstrap (first admin)
 
-Cuando inicias el servidor por primera vez, necesitas aprobar el primer dispositivo manualmente:
+When you start the server for the first time, you need to approve the first device and make it admin:
 
 ```bash
-# 1. En el cliente, inicializa y obtén el device_id
+# 1. On the client, initialize and get the device_id
 zcloud init https://api.zyrak.cloud
-# Anota el Device ID que te muestra
+# Note the Device ID shown by the CLI
 
-# 2. En el servidor, aprobar el dispositivo y marcarlo como admin
-zcloud-server admin devices approve <device_id>
-# Para el primer dispositivo, también debes marcarlo como admin:
+# 2. On the server, approve the device and assign it to your user/persona
+zcloud-server admin devices approve <device_id> --user stefan
+# This prints an "Enrollment code" (one-time, expires in ~10 minutes)
+
+# 3. For the first device only, mark it as admin:
 sqlite3 /opt/zcloud-server/data/zcloud.db "UPDATE devices SET is_admin=1 WHERE id='<device_id>'"
 
-# 3. En el cliente, verificar aprobación
+# 4. On the client, confirm approval
 zcloud init --complete
 
-# 4. Configurar TOTP
-zcloud totp
+# 5. Configure TOTP (only once per user) using the Enrollment code printed at approval time
+zcloud totp ABCD-EFGH-IJKL
 
-# 5. Ya puedes usar zcloud normalmente
+# 6. You're ready
 zcloud login
 zcloud status
 ```
 
-> 💡 **Después de esta configuración inicial**, podrás aprobar nuevos dispositivos directamente en el servidor con `zcloud-server admin devices approve <id>`.
+> 💡 After this initial setup, you can approve new devices on the server with `zcloud-server admin devices approve <id>`.
 
-## 📁 Estructura de archivos
+## 📁 File layout
 
-### Cliente (`~/.zcloud/`)
+### Client (`~/.zcloud/`)
 
 ```
 ~/.zcloud/
-├── config.yaml      # Configuración del cliente
-├── device.key       # Clave privada (Ed25519)
-├── device.pub       # Clave pública
-└── kubeconfig       # Kubeconfig para kubectl/Powerlevel10k
+├── config.yaml      # Client config
+├── device.key       # Private key (Ed25519)
+├── device.pub       # Public key
+└── kubeconfig       # Kubeconfig for kubectl/Powerlevel10k
 ```
 
-### Servidor (`/opt/zcloud-server/`)
+### Server (`/opt/zcloud-server/`)
 
 ```
 /opt/zcloud-server/
-├── zcloud-server    # Binario
-├── config.yaml      # Configuración
+├── zcloud-server    # Binary
+├── config.yaml      # Config
 ├── data/
-│   ├── zcloud.db    # Base de datos SQLite
-│   └── jwt.secret   # Secreto JWT
+│   ├── zcloud.db    # SQLite database
+│   └── jwt.secret   # JWT secret
 └── certs/
-    ├── fullchain.pem  # Certificado TLS
-    └── privkey.pem    # Clave privada TLS
+    ├── fullchain.pem  # TLS cert
+    └── privkey.pem    # TLS private key
 ```
 
-## ⚙️ Configuración del servidor
+## ⚙️ Server configuration
 
 ```yaml
 # /opt/zcloud-server/config.yaml
@@ -279,26 +302,21 @@ storage:
   database: /opt/zcloud-server/data/zcloud.db
 ```
 
-**Configuración Kubernetes:**
-- `kubeconfig`: Path al archivo kubeconfig de k3s
-- `coredns_ip`: IP del servicio CoreDNS para resolución de servicios k8s (default: `10.43.0.10:53`)
-   - Ajustar si tu cluster k3s usa una IP diferente para CoreDNS
-   - Necesario para que funcione el port forwarding a servicios k8s
-- `ca_cert`: Path al certificado CA del cluster k3s (opcional)
-   - Si se especifica, se usa para verificar las conexiones TLS al cluster k3s
-   - Si no se especifica, se intenta extraer del kubeconfig automáticamente
-   - Mejora la seguridad al validar certificados en lugar de usar InsecureSkipVerify
+**Kubernetes configuration:**
+- `kubeconfig`: path to the k3s kubeconfig file
+- `coredns_ip`: CoreDNS service IP for resolving k8s service names (default: `10.43.0.10:53`)
+- `ca_cert`: path to the k3s cluster CA certificate (optional)
 
-## 🏥 Health Checks
+## 🏥 Health checks
 
-ZCloud expone endpoints de salud para monitoreo y orquestación:
+ZCloud exposes health endpoints for monitoring and orchestration:
 
-### `/health` - Liveness check
+### `/health` - Liveness
 ```bash
 curl https://api.zyrak.cloud/health
 ```
 
-Respuesta:
+Response:
 ```json
 {
   "status": "ok",
@@ -306,12 +324,12 @@ Respuesta:
 }
 ```
 
-### `/ready` - Readiness check
+### `/ready` - Readiness
 ```bash
 curl https://api.zyrak.cloud/ready
 ```
 
-Respuesta (cuando está listo):
+Response (ready):
 ```json
 {
   "status": "ready",
@@ -319,7 +337,7 @@ Respuesta (cuando está listo):
 }
 ```
 
-Respuesta (cuando hay problemas):
+Response (not ready):
 ```json
 {
   "status": "not_ready",
@@ -327,11 +345,11 @@ Respuesta (cuando hay problemas):
 }
 ```
 
-Posibles razones:
-- `database_unavailable`: No se puede conectar a la base de datos
-- `kubernetes_unavailable`: No se puede conectar a la API de k8s
+Possible reasons:
+- `database_unavailable`: cannot connect to the database
+- `kubernetes_unavailable`: cannot connect to the k8s API
 
-### Uso con orquestadores
+### Orchestrators
 ```yaml
 # Kubernetes livenessProbe
 livenessProbe:
@@ -348,99 +366,104 @@ readinessProbe:
     scheme: HTTPS
 ```
 
-## 🔧 Desarrollo
+## 🔧 Development
 
 ```bash
-# Clonar repositorio
+# Clone
 git clone https://github.com/zyrak/zcloud
 cd zcloud
 
-# Instalar dependencias
+# Install deps
 make deps
 
-# Compilar
+# Build
 make build
 
-# Ejecutar tests
+# Run tests
 make test
 
-# Desarrollo local (servidor)
+# Local dev (server)
 make dev-server
 
-# Desarrollo local (cliente)
+# Local dev (client)
 make dev-client
 ```
 
 ## 🧪 Testing
 
-ZCloud incluye un conjunto completo de pruebas unitarias para garantizar la calidad y estabilidad del código:
+ZCloud includes unit tests for core components:
 
 ```bash
-# Ejecutar todas las pruebas
+# Run all tests
 make test
 
-# Ejecutar pruebas de un paquete específico
+# Run package-specific tests
 go test ./internal/server/db/...
 go test ./internal/shared/crypto/...
 go test ./internal/server/middleware/...
 
-# Ejecutar pruebas con cobertura
+# Coverage
 go test -cover ./...
 ```
 
-### Cobertura de Pruebas
+### Test coverage
 
-- **Database Operations**: 20 casos de prueba para operaciones CRUD, sesiones y revocación
-- **Cryptography**: 13 casos de prueba para generación de claves, firmas y TOTP
-- **Authentication**: 21 casos de prueba para JWT, middleware y seguridad
-- **Rate Limiting**: 10 casos de prueba incluyendo concurrencia y expiración
+- **Database Operations**: 20 test cases for CRUD, sessions, and revocation
+- **Cryptography**: 13 test cases for key generation, signatures, and TOTP
+- **Authentication**: 21 test cases for JWT, middleware, and security
+- **Rate Limiting**: 10 test cases including concurrency and expiration
 
-Todas las pruebas pasan con éxito, garantizando la estabilidad de los componentes críticos.
+All tests pass, ensuring stability of critical components.
 
-## 📋 API Reference
+## 📋 API reference
 
-| Endpoint | Método | Descripción |
+| Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/api/v1/devices/register` | POST | Registrar nuevo dispositivo |
-| `/api/v1/devices/status` | GET | Estado del registro |
-| `/api/v1/auth/login` | POST | Iniciar sesión |
-| `/api/v1/auth/logout` | POST | Cerrar sesión |
-| `/api/v1/status/cluster` | GET | Estado del cluster |
-| `/api/v1/k8s/apply` | POST | Aplicar manifests |
-| `/api/v1/k8s/proxy/*` | ALL | Proxy a API de Kubernetes |
-| `/api/v1/ssh/exec` | POST | Ejecutar comando |
-| `/api/v1/admin/devices` | GET | Listar dispositivos |
-| `/api/v1/admin/devices/:id/approve` | POST | Aprobar dispositivo |
-| `/api/v1/admin/devices/:id/revoke` | POST | Revocar dispositivo |
+| `/api/v1/devices/register` | POST | Register a new device |
+| `/api/v1/devices/status` | GET | Registration status (no secrets) |
+| `/api/v1/totp/enroll` | POST | TOTP enrollment (one-time enrollment code + device signature) |
+| `/api/v1/auth/login` | POST | Login |
+| `/api/v1/auth/logout` | POST | Logout |
+| `/api/v1/status/cluster` | GET | Cluster status |
+| `/api/v1/k8s/apply` | POST | Apply manifests |
+| `/api/v1/k8s/proxy/*` | ALL | Kubernetes API proxy |
+| `/api/v1/ssh/exec` | POST | Execute a command |
+| `/api/v1/admin/devices` | GET | List devices |
+| `/api/v1/admin/devices/:id/approve` | POST | Approve device + emit enrollment code (optional `?user=<name>`) |
+| `/api/v1/admin/devices/:id/revoke` | POST | Revoke device |
 
 ## 🚨 Troubleshooting
 
 ### Error: "device not approved"
 ```bash
-# En el servidor, aprobar el dispositivo
-zcloud admin devices approve <device_id>
+# On the server, approve the device
+zcloud admin devices approve <device_id> --user stefan
 
-# En el cliente, completar configuración
+# On the client, complete setup
 zcloud init --complete
 ```
 
 ### Error: "invalid TOTP code"
-- Verifica que la hora de tu dispositivo está sincronizada (NTP)
-- Regenera el TOTP si es necesario
+- Make sure your device time is synced (NTP)
+- If you lost the TOTP, rotate it on the server and re-enroll (this generates a new enrollment code):
+```bash
+zcloud-server admin users rotate <user_name> --device <device_id>
+zcloud totp ABCD-EFGH-IJKL
+```
 
 ### Error: "connection refused"
-- Verifica que el servidor está corriendo: `systemctl status zcloud-server`
-- Verifica el firewall: `ufw status`
-- Verifica TLS: `curl -k https://api.zyrak.cloud/health`
+- Check the service: `systemctl status zcloud-server`
+- Check the firewall: `ufw status`
+- Check TLS/health: `curl -k https://api.zyrak.cloud/health`
 
-## 📄 Licencia
+## 📄 License
 
 MIT
 
-## 🤝 Contribuir
+## 🤝 Contributing
 
-1. Fork el repositorio
-2. Crea una rama (`git checkout -b feature/mi-feature`)
-3. Commit (`git commit -am 'Add mi-feature'`)
-4. Push (`git push origin feature/mi-feature`)
-5. Abre un Pull Request
+1. Fork the repository
+2. Create a branch (`git checkout -b feature/my-feature`)
+3. Commit (`git commit -am 'Add my feature'`)
+4. Push (`git push origin feature/my-feature`)
+5. Open a Pull Request

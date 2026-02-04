@@ -3,6 +3,7 @@ package db
 import (
 	"database/sql"
 	"fmt"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -41,9 +42,12 @@ func (d *Database) Ping() error {
 }
 
 func createTables(db *sql.DB) error {
+	// Base schema (create-if-not-exists). For schema evolution, we also run
+	// lightweight migrations after this block.
 	schema := `
 	CREATE TABLE IF NOT EXISTS devices (
 		id TEXT PRIMARY KEY,
+		user_id TEXT,
 		name TEXT NOT NULL,
 		public_key TEXT NOT NULL UNIQUE,
 		hostname TEXT,
@@ -53,6 +57,25 @@ func createTables(db *sql.DB) error {
 		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
 		last_access DATETIME,
 		is_admin INTEGER DEFAULT 0
+	);
+
+	CREATE TABLE IF NOT EXISTS users (
+		id TEXT PRIMARY KEY,
+		name TEXT NOT NULL UNIQUE,
+		totp_secret TEXT NOT NULL,
+		totp_configured_at DATETIME,
+		created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+	);
+
+	CREATE TABLE IF NOT EXISTS totp_enrollments (
+		code_hash TEXT PRIMARY KEY,
+		device_id TEXT NOT NULL,
+		user_id TEXT NOT NULL,
+		expires_at DATETIME NOT NULL,
+		used_at DATETIME,
+		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+		FOREIGN KEY (device_id) REFERENCES devices(id),
+		FOREIGN KEY (user_id) REFERENCES users(id)
 	);
 
 	CREATE TABLE IF NOT EXISTS sessions (
@@ -77,11 +100,30 @@ func createTables(db *sql.DB) error {
 	CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires_at);
 	CREATE INDEX IF NOT EXISTS idx_revoked_tokens_hash ON revoked_tokens(token_hash);
 	CREATE INDEX IF NOT EXISTS idx_revoked_tokens_expires ON revoked_tokens(expires_at);
+	CREATE INDEX IF NOT EXISTS idx_devices_user ON devices(user_id);
+	CREATE INDEX IF NOT EXISTS idx_enrollments_device ON totp_enrollments(device_id);
+	CREATE INDEX IF NOT EXISTS idx_enrollments_expires ON totp_enrollments(expires_at);
 	`
 
 	_, err := db.Exec(schema)
 	if err != nil {
 		return fmt.Errorf("failed to create tables: %w", err)
+	}
+
+	// Lightweight migrations for existing DBs.
+	// SQLite doesn't support IF NOT EXISTS for ADD COLUMN on all versions, so we ignore
+	// "duplicate column name" errors.
+	migrations := []string{
+		`ALTER TABLE devices ADD COLUMN user_id TEXT;`,
+	}
+	for _, stmt := range migrations {
+		if _, err := db.Exec(stmt); err != nil {
+			// Ignore "duplicate column name" and similar "already exists" errors.
+			if !strings.Contains(err.Error(), "duplicate column") && !strings.Contains(err.Error(), "already exists") {
+				// If it's another kind of error, surface it.
+				return fmt.Errorf("failed migration (%s): %w", stmt, err)
+			}
+		}
 	}
 
 	return nil
@@ -92,9 +134,9 @@ func createTables(db *sql.DB) error {
 // CreateDevice crea un nuevo dispositivo
 func (d *Database) CreateDevice(device *protocol.DeviceInfo, totpSecret string) error {
 	_, err := d.db.Exec(`
-		INSERT INTO devices (id, name, public_key, hostname, os, status, totp_secret, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-	`, device.ID, device.Name, device.PublicKey, device.Hostname, device.OS, device.Status, totpSecret, device.CreatedAt)
+		INSERT INTO devices (id, user_id, name, public_key, hostname, os, status, totp_secret, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, device.ID, nullIfEmpty(device.UserID), device.Name, device.PublicKey, device.Hostname, device.OS, device.Status, totpSecret, device.CreatedAt)
 
 	if err != nil {
 		return fmt.Errorf("failed to create device: %w", err)
@@ -105,12 +147,13 @@ func (d *Database) CreateDevice(device *protocol.DeviceInfo, totpSecret string) 
 // GetDevice obtiene un dispositivo por ID
 func (d *Database) GetDevice(id string) (*protocol.DeviceInfo, error) {
 	var device protocol.DeviceInfo
+	var userID sql.NullString
 	var lastAccess sql.NullTime
 
 	err := d.db.QueryRow(`
-		SELECT id, name, public_key, hostname, os, status, created_at, last_access
+		SELECT id, user_id, name, public_key, hostname, os, status, created_at, last_access
 		FROM devices WHERE id = ?
-	`, id).Scan(&device.ID, &device.Name, &device.PublicKey, &device.Hostname, &device.OS, &device.Status, &device.CreatedAt, &lastAccess)
+	`, id).Scan(&device.ID, &userID, &device.Name, &device.PublicKey, &device.Hostname, &device.OS, &device.Status, &device.CreatedAt, &lastAccess)
 
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -119,6 +162,9 @@ func (d *Database) GetDevice(id string) (*protocol.DeviceInfo, error) {
 		return nil, fmt.Errorf("failed to get device: %w", err)
 	}
 
+	if userID.Valid {
+		device.UserID = userID.String
+	}
 	if lastAccess.Valid {
 		device.LastAccess = lastAccess.Time
 	}
@@ -129,12 +175,13 @@ func (d *Database) GetDevice(id string) (*protocol.DeviceInfo, error) {
 // GetDeviceByPublicKey obtiene un dispositivo por clave pública
 func (d *Database) GetDeviceByPublicKey(publicKey string) (*protocol.DeviceInfo, error) {
 	var device protocol.DeviceInfo
+	var userID sql.NullString
 	var lastAccess sql.NullTime
 
 	err := d.db.QueryRow(`
-		SELECT id, name, public_key, hostname, os, status, created_at, last_access
+		SELECT id, user_id, name, public_key, hostname, os, status, created_at, last_access
 		FROM devices WHERE public_key = ?
-	`, publicKey).Scan(&device.ID, &device.Name, &device.PublicKey, &device.Hostname, &device.OS, &device.Status, &device.CreatedAt, &lastAccess)
+	`, publicKey).Scan(&device.ID, &userID, &device.Name, &device.PublicKey, &device.Hostname, &device.OS, &device.Status, &device.CreatedAt, &lastAccess)
 
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -143,6 +190,9 @@ func (d *Database) GetDeviceByPublicKey(publicKey string) (*protocol.DeviceInfo,
 		return nil, fmt.Errorf("failed to get device: %w", err)
 	}
 
+	if userID.Valid {
+		device.UserID = userID.String
+	}
 	if lastAccess.Valid {
 		device.LastAccess = lastAccess.Time
 	}
@@ -187,10 +237,19 @@ func (d *Database) UpdateDeviceLastAccess(id string) error {
 	return nil
 }
 
+// SetDeviceUserID asigna un dispositivo a un usuario.
+func (d *Database) SetDeviceUserID(deviceID, userID string) error {
+	_, err := d.db.Exec(`UPDATE devices SET user_id = ? WHERE id = ?`, userID, deviceID)
+	if err != nil {
+		return fmt.Errorf("failed to set device user_id: %w", err)
+	}
+	return nil
+}
+
 // ListDevices lista todos los dispositivos
 func (d *Database) ListDevices() ([]protocol.DeviceInfo, error) {
 	rows, err := d.db.Query(`
-		SELECT id, name, public_key, hostname, os, status, created_at, last_access
+		SELECT id, user_id, name, public_key, hostname, os, status, created_at, last_access
 		FROM devices ORDER BY created_at DESC
 	`)
 	if err != nil {
@@ -201,12 +260,16 @@ func (d *Database) ListDevices() ([]protocol.DeviceInfo, error) {
 	var devices []protocol.DeviceInfo
 	for rows.Next() {
 		var device protocol.DeviceInfo
+		var userID sql.NullString
 		var lastAccess sql.NullTime
 
-		if err := rows.Scan(&device.ID, &device.Name, &device.PublicKey, &device.Hostname, &device.OS, &device.Status, &device.CreatedAt, &lastAccess); err != nil {
+		if err := rows.Scan(&device.ID, &userID, &device.Name, &device.PublicKey, &device.Hostname, &device.OS, &device.Status, &device.CreatedAt, &lastAccess); err != nil {
 			return nil, fmt.Errorf("failed to scan device: %w", err)
 		}
 
+		if userID.Valid {
+			device.UserID = userID.String
+		}
 		if lastAccess.Valid {
 			device.LastAccess = lastAccess.Time
 		}
@@ -238,6 +301,179 @@ func (d *Database) SetAdmin(deviceID string, isAdmin bool) error {
 		return fmt.Errorf("failed to set admin: %w", err)
 	}
 	return nil
+}
+
+// ======================
+// Users (persona/cuenta)
+// ======================
+
+type User struct {
+	ID              string
+	Name            string
+	TOTPSecret      string
+	TOTPConfiguredAt sql.NullTime
+	CreatedAt       time.Time
+}
+
+// CreateUser crea un usuario (persona) con su secreto TOTP.
+func (d *Database) CreateUser(id, name, totpSecret string) error {
+	_, err := d.db.Exec(`
+		INSERT INTO users (id, name, totp_secret)
+		VALUES (?, ?, ?)
+	`, id, name, totpSecret)
+	if err != nil {
+		return fmt.Errorf("failed to create user: %w", err)
+	}
+	return nil
+}
+
+// GetUser obtiene un usuario por ID.
+func (d *Database) GetUser(id string) (*User, error) {
+	var u User
+	err := d.db.QueryRow(`
+		SELECT id, name, totp_secret, totp_configured_at, created_at
+		FROM users WHERE id = ?
+	`, id).Scan(&u.ID, &u.Name, &u.TOTPSecret, &u.TOTPConfiguredAt, &u.CreatedAt)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("failed to get user: %w", err)
+	}
+	return &u, nil
+}
+
+// GetUserByName obtiene un usuario por nombre.
+func (d *Database) GetUserByName(name string) (*User, error) {
+	var u User
+	err := d.db.QueryRow(`
+		SELECT id, name, totp_secret, totp_configured_at, created_at
+		FROM users WHERE name = ?
+	`, name).Scan(&u.ID, &u.Name, &u.TOTPSecret, &u.TOTPConfiguredAt, &u.CreatedAt)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("failed to get user by name: %w", err)
+	}
+	return &u, nil
+}
+
+func (d *Database) ListUsers() ([]User, error) {
+	rows, err := d.db.Query(`
+		SELECT id, name, totp_secret, totp_configured_at, created_at
+		FROM users
+		ORDER BY created_at DESC
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list users: %w", err)
+	}
+	defer rows.Close()
+
+	var users []User
+	for rows.Next() {
+		var u User
+		if err := rows.Scan(&u.ID, &u.Name, &u.TOTPSecret, &u.TOTPConfiguredAt, &u.CreatedAt); err != nil {
+			return nil, fmt.Errorf("failed to scan user: %w", err)
+		}
+		users = append(users, u)
+	}
+	return users, nil
+}
+
+func (d *Database) MarkUserTOTPConfigured(userID string) (bool, error) {
+	res, err := d.db.Exec(`UPDATE users SET totp_configured_at = ? WHERE id = ? AND totp_configured_at IS NULL`, time.Now(), userID)
+	if err != nil {
+		return false, fmt.Errorf("failed to mark user totp configured: %w", err)
+	}
+	affected, _ := res.RowsAffected()
+	return affected == 1, nil
+}
+
+// GetUserTOTPSecret devuelve el secreto TOTP y si ya fue "configurado".
+func (d *Database) GetUserTOTPSecret(userID string) (secret string, configured bool, err error) {
+	var totpSecret string
+	var configuredAt sql.NullTime
+	err = d.db.QueryRow(`SELECT totp_secret, totp_configured_at FROM users WHERE id = ?`, userID).Scan(&totpSecret, &configuredAt)
+	if err == sql.ErrNoRows {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("failed to get user totp secret: %w", err)
+	}
+	return totpSecret, configuredAt.Valid, nil
+}
+
+// UpdateUserTOTPSecret rotates the user's TOTP secret and resets the configured marker.
+func (d *Database) UpdateUserTOTPSecret(userID, totpSecret string) error {
+	_, err := d.db.Exec(`UPDATE users SET totp_secret = ?, totp_configured_at = NULL WHERE id = ?`, totpSecret, userID)
+	if err != nil {
+		return fmt.Errorf("failed to update user totp secret: %w", err)
+	}
+	return nil
+}
+
+// ======================
+// TOTP Enrollment Codes
+// ======================
+
+func (d *Database) CreateTOTPEnrollment(codeHash, deviceID, userID string, expiresAt time.Time) error {
+	_, err := d.db.Exec(`
+		INSERT INTO totp_enrollments (code_hash, device_id, user_id, expires_at)
+		VALUES (?, ?, ?, ?)
+	`, codeHash, deviceID, userID, expiresAt)
+	if err != nil {
+		return fmt.Errorf("failed to create totp enrollment: %w", err)
+	}
+	return nil
+}
+
+// ConsumeTOTPEnrollment valida y consume (one-time) un código de enrolamiento.
+// Devuelve el user_id asociado si es válido.
+func (d *Database) ConsumeTOTPEnrollment(codeHash, deviceID string) (string, error) {
+	tx, err := d.db.Begin()
+	if err != nil {
+		return "", fmt.Errorf("failed to begin tx: %w", err)
+	}
+	defer tx.Rollback()
+
+	var userID string
+	var expiresAt time.Time
+	var usedAt sql.NullTime
+
+	err = tx.QueryRow(`
+		SELECT user_id, expires_at, used_at
+		FROM totp_enrollments
+		WHERE code_hash = ? AND device_id = ?
+	`, codeHash, deviceID).Scan(&userID, &expiresAt, &usedAt)
+	if err == sql.ErrNoRows {
+		return "", fmt.Errorf("invalid enrollment code")
+	}
+	if err != nil {
+		return "", fmt.Errorf("failed to query enrollment: %w", err)
+	}
+
+	if usedAt.Valid {
+		return "", fmt.Errorf("enrollment code already used")
+	}
+	if time.Now().After(expiresAt) {
+		return "", fmt.Errorf("enrollment code expired")
+	}
+
+	res, err := tx.Exec(`UPDATE totp_enrollments SET used_at = ? WHERE code_hash = ? AND used_at IS NULL`, time.Now(), codeHash)
+	if err != nil {
+		return "", fmt.Errorf("failed to consume enrollment: %w", err)
+	}
+	affected, _ := res.RowsAffected()
+	if affected != 1 {
+		return "", fmt.Errorf("enrollment code already used")
+	}
+
+	if err := tx.Commit(); err != nil {
+		return "", fmt.Errorf("failed to commit: %w", err)
+	}
+
+	return userID, nil
 }
 
 // Session methods
@@ -376,4 +612,11 @@ func (d *Database) GetActiveSessions() ([]map[string]interface{}, error) {
 	}
 
 	return sessions, nil
+}
+
+func nullIfEmpty(s string) any {
+	if s == "" {
+		return nil
+	}
+	return s
 }

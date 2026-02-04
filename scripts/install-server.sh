@@ -1,10 +1,10 @@
 #!/bin/bash
 #===============================================================================
 # ZCLOUD SERVER INSTALLER
-# Instala zcloud-server en el N150
+# Installs zcloud-server (intended for the N150)
 #
-# USO: curl -fsSL https://api.zyrak.cloud/install-server.sh | sudo bash
-#      o: sudo ./install-server.sh
+# Usage: curl -fsSL https://api.zyrak.cloud/install-server.sh | sudo bash
+#        or: sudo ./install-server.sh
 #===============================================================================
 
 set -euo pipefail
@@ -29,67 +29,67 @@ log_error() { echo -e "${RED}[ERROR]${NC} $1"; exit 1; }
 
 check_root() {
     if [[ $EUID -ne 0 ]]; then
-        log_error "Este script debe ejecutarse como root"
+        log_error "This script must be run as root"
     fi
 }
 
 check_dependencies() {
-    log_info "Verificando dependencias..."
+    log_info "Checking dependencies..."
     
     # kubectl/k3s
     if ! command -v kubectl &>/dev/null && ! command -v k3s &>/dev/null; then
-        log_error "kubectl o k3s no encontrado. Instala k3s primero."
+        log_error "kubectl or k3s not found. Install k3s first."
     fi
     
     # certbot (opcional pero recomendado)
     if ! command -v certbot &>/dev/null; then
-        log_warn "certbot no encontrado. Instálalo para certificados TLS automáticos:"
+        log_warn "certbot not found. Install it for automatic TLS certificates:"
         log_warn "  apt install certbot"
     fi
     
-    log_ok "Dependencias verificadas"
+    log_ok "Dependencies OK"
 }
 
 create_directories() {
-    log_info "Creando directorios..."
+    log_info "Creating directories..."
     
     mkdir -p ${INSTALL_DIR}/{data,certs}
     chmod 750 ${INSTALL_DIR}
     chmod 700 ${INSTALL_DIR}/data
     chmod 750 ${INSTALL_DIR}/certs
     
-    log_ok "Directorios creados"
+    log_ok "Directories created"
 }
 
 install_binary() {
-    log_info "Instalando binario..."
+    log_info "Installing binary..."
     
     if [[ -f "$LOCAL_BINARY" ]]; then
         # Usar binario local (desarrollo)
         cp "$LOCAL_BINARY" ${INSTALL_DIR}/zcloud-server
-        log_info "Usando binario local"
+        log_info "Using local binary"
     else
         # Descargar binario
-        log_info "Descargando desde ${BINARY_URL}..."
+        log_info "Downloading from ${BINARY_URL}..."
         if ! curl -fsSL -o ${INSTALL_DIR}/zcloud-server "$BINARY_URL"; then
-            log_error "Error descargando binario"
+            log_error "Failed to download binary"
         fi
     fi
     
     chmod +x ${INSTALL_DIR}/zcloud-server
-    log_ok "Binario instalado"
+    log_ok "Binary installed"
 }
 
 create_config() {
-    log_info "Creando configuración..."
+    log_info "Creating configuration..."
     
     if [[ -f ${INSTALL_DIR}/config.yaml ]]; then
-        log_warn "config.yaml ya existe, no se sobrescribe"
+        log_warn "config.yaml already exists, not overwriting"
         return
     fi
     
     # Obtener dominio del usuario
-    read -p "Dominio para la API (ej: api.zyrak.cloud): " DOMAIN
+    read -p "API domain (e.g. api.zyrak.cloud): " DOMAIN
     DOMAIN=${DOMAIN:-api.zyrak.cloud}
     
     cat > ${INSTALL_DIR}/config.yaml << EOF
@@ -120,19 +120,19 @@ storage:
 EOF
 
     chmod 600 ${INSTALL_DIR}/config.yaml
-    log_ok "Configuración creada"
+    log_ok "Configuration created"
 }
 
 init_server() {
-    log_info "Inicializando servidor..."
+    log_info "Initializing server..."
     
     ${INSTALL_DIR}/zcloud-server --init --config ${INSTALL_DIR}/config.yaml
     
-    log_ok "Servidor inicializado"
+    log_ok "Server initialized"
 }
 
 install_systemd() {
-    log_info "Instalando servicio systemd..."
+    log_info "Installing systemd service..."
     
     cat > /etc/systemd/system/zcloud-server.service << 'EOF'
 [Unit]
@@ -162,40 +162,40 @@ WantedBy=multi-user.target
 EOF
 
     systemctl daemon-reload
-    log_ok "Servicio systemd instalado"
+    log_ok "systemd service installed"
 }
 
 setup_firewall() {
-    log_info "Configurando firewall..."
+    log_info "Configuring firewall..."
     
     if command -v ufw &>/dev/null; then
         ufw allow 443/tcp comment 'ZCloud API' 2>/dev/null || true
-        log_ok "Puerto 443 abierto en UFW"
+        log_ok "Port 443 opened in UFW"
     else
-        log_warn "UFW no encontrado, configura el firewall manualmente"
+        log_warn "UFW not found, configure the firewall manually"
     fi
 }
 
 setup_tls() {
-    log_info "Configurando TLS..."
+    log_info "Configuring TLS..."
     
     # Leer dominio de config
     DOMAIN=$(grep "domain:" ${INSTALL_DIR}/config.yaml | awk '{print $2}')
     
     if command -v certbot &>/dev/null; then
         echo ""
-        echo "Para obtener certificados TLS con Let's Encrypt:"
+        echo "To obtain TLS certificates with Let's Encrypt:"
         echo ""
         echo "  sudo certbot certonly --standalone -d ${DOMAIN}"
         echo ""
-        echo "Después crea enlaces simbólicos:"
+        echo "Then create symlinks:"
         echo ""
         echo "  sudo ln -sf /etc/letsencrypt/live/${DOMAIN}/fullchain.pem ${INSTALL_DIR}/certs/"
         echo "  sudo ln -sf /etc/letsencrypt/live/${DOMAIN}/privkey.pem ${INSTALL_DIR}/certs/"
         echo ""
     else
         echo ""
-        echo "Instala certbot y obtén certificados TLS:"
+        echo "Install certbot and obtain TLS certificates:"
         echo ""
         echo "  sudo apt install certbot"
         echo "  sudo certbot certonly --standalone -d ${DOMAIN}"
@@ -204,11 +204,11 @@ setup_tls() {
 }
 
 create_first_admin() {
-    log_info "Configurando primer administrador..."
+    log_info "First admin bootstrap..."
     
     echo ""
-    echo "El primer dispositivo que se registre será automáticamente admin."
-    echo "Para registrar tu dispositivo, instala el cliente zcloud y ejecuta:"
+    echo "The first device you register should be made admin."
+    echo "To register your device, install the zcloud client and run:"
     echo ""
     echo "  zcloud init https://\$(tu-dominio)"
     echo ""
@@ -217,38 +217,38 @@ create_first_admin() {
 final_report() {
     echo ""
     echo -e "${GREEN}════════════════════════════════════════════════════════════════${NC}"
-    echo -e "${GREEN}✅ ZCLOUD SERVER INSTALADO${NC}"
+    echo -e "${GREEN}✅ ZCLOUD SERVER INSTALLED${NC}"
     echo -e "${GREEN}════════════════════════════════════════════════════════════════${NC}"
     echo ""
     
-    echo -e "${CYAN}Archivos instalados:${NC}"
-    echo "  ${INSTALL_DIR}/zcloud-server      (binario)"
-    echo "  ${INSTALL_DIR}/config.yaml        (configuración)"
-    echo "  ${INSTALL_DIR}/data/              (base de datos)"
-    echo "  ${INSTALL_DIR}/certs/             (certificados TLS)"
+    echo -e "${CYAN}Installed files:${NC}"
+    echo "  ${INSTALL_DIR}/zcloud-server      (binary)"
+    echo "  ${INSTALL_DIR}/config.yaml        (configuration)"
+    echo "  ${INSTALL_DIR}/data/              (database)"
+    echo "  ${INSTALL_DIR}/certs/             (TLS certificates)"
     echo ""
     
-    echo -e "${CYAN}Próximos pasos:${NC}"
+    echo -e "${CYAN}Next steps:${NC}"
     echo ""
-    echo "1. Configura DNS:"
-    echo "   Apunta tu dominio a la IP pública de este servidor"
+    echo "1. Configure DNS:"
+    echo "   Point your domain to this server's public IP"
     echo ""
-    echo "2. Obtén certificados TLS:"
+    echo "2. Obtain TLS certificates:"
     echo "   sudo certbot certonly --standalone -d api.zyrak.cloud"
     echo "   sudo ln -sf /etc/letsencrypt/live/api.zyrak.cloud/fullchain.pem ${INSTALL_DIR}/certs/"
     echo "   sudo ln -sf /etc/letsencrypt/live/api.zyrak.cloud/privkey.pem ${INSTALL_DIR}/certs/"
     echo ""
-    echo "3. Inicia el servidor:"
+    echo "3. Start the server:"
     echo "   sudo systemctl enable --now zcloud-server"
     echo ""
-    echo "4. Verifica:"
+    echo "4. Verify:"
     echo "   sudo systemctl status zcloud-server"
     echo "   curl -k https://localhost/health"
     echo ""
     
-    echo -e "${CYAN}Comandos útiles:${NC}"
-    echo "  journalctl -u zcloud-server -f    # Ver logs"
-    echo "  systemctl restart zcloud-server   # Reiniciar"
+    echo -e "${CYAN}Useful commands:${NC}"
+    echo "  journalctl -u zcloud-server -f    # Follow logs"
+    echo "  systemctl restart zcloud-server   # Restart"
     echo ""
 }
 

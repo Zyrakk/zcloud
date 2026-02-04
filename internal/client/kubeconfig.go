@@ -28,7 +28,7 @@ type KubeCluster struct {
 // ClusterEntry datos del cluster
 type ClusterEntry struct {
 	Server                string `yaml:"server"`
-	CertificateAuthority  string `yaml:"certificate-authority-data,omitempty"`
+	CertificateAuthorityData string `yaml:"certificate-authority-data,omitempty"`
 	InsecureSkipTLSVerify bool   `yaml:"insecure-skip-tls-verify,omitempty"`
 }
 
@@ -78,6 +78,9 @@ func (c *Config) GenerateKubeconfig(token string) error {
 				Name: contextName,
 				Cluster: ClusterEntry{
 					Server: c.Server.URL + "/api/v1/k8s/proxy",
+					// If the user explicitly configured the client in insecure mode (e.g. self-signed server cert),
+					// mirror that behavior so `kubectl` works too.
+					InsecureSkipTLSVerify: c.Server.Insecure,
 				},
 			},
 		},

@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
@@ -22,6 +23,7 @@ var (
 	k8sCACertPool  *x509.CertPool
 	k8sClientCert  tls.Certificate
 	k8sHasClientCert bool
+	k8sBearerToken string
 )
 
 // kubeconfigFile represents the structure of a kubeconfig file
@@ -67,11 +69,19 @@ func (a *API) handleK8sProxy(w http.ResponseWriter, r *http.Request) {
 		k8sURL += "?" + r.URL.RawQuery
 	}
 
-	// Check if this is a watch request (requires streaming)
-	isWatch := isWatchRequest(r)
+	// Check if this is a streaming request (requires flushing + no timeout)
+	isStream := isStreamingRequest(r)
 
-	// Create the proxy request with context propagation for cancellation
-	proxyReq, err := http.NewRequestWithContext(r.Context(), r.Method, k8sURL, r.Body)
+	// Create the proxy request with context propagation for cancellation.
+	// For non-streaming requests, enforce a reasonable timeout to avoid hanging handlers.
+	ctx := r.Context()
+	if !isStream {
+		var cancel func()
+		ctx, cancel = context.WithTimeout(ctx, 60*time.Second)
+		defer cancel()
+	}
+
+	proxyReq, err := http.NewRequestWithContext(ctx, r.Method, k8sURL, r.Body)
 	if err != nil {
 		http.Error(w, "failed to create proxy request: "+err.Error(), http.StatusInternalServerError)
 		return
@@ -125,8 +135,8 @@ func (a *API) handleK8sProxy(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(resp.StatusCode)
 
 	// Copy response body with streaming support for watch requests
-	if isWatch {
-		// Use flushing copy for watch/streaming requests
+	if isStream {
+		// Use flushing copy for streaming requests
 		flushingCopy(w, resp.Body)
 	} else {
 		// Standard copy for regular requests
@@ -137,8 +147,6 @@ func (a *API) handleK8sProxy(w http.ResponseWriter, r *http.Request) {
 // getK8sClient creates an HTTP client with proper TLS configuration for k8s auth
 // It caches the TLS config but creates a new client for each request to avoid connection reuse issues
 func (a *API) getK8sClient() (*http.Client, string, error) {
-	var token string
-
 	k8sConfigOnce.Do(func() {
 		// Load CA certificate if specified in config
 		if a.config.CACertPath != "" {
@@ -161,9 +169,19 @@ func (a *API) getK8sClient() (*http.Client, string, error) {
 		// First try in-cluster service account token
 		tokenBytes, err := os.ReadFile("/var/run/secrets/kubernetes.io/serviceaccount/token")
 		if err == nil {
-			// Running in-cluster - use service account token with proper CA validation
-			token = string(tokenBytes)
+			// Running in-cluster - use service account token.
+			k8sBearerToken = strings.TrimSpace(string(tokenBytes))
 			k8sHasClientCert = false
+
+			// If no CA was specified, use the in-cluster service account CA if present.
+			if k8sCACertPool == nil {
+				if caBytes, err := os.ReadFile("/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"); err == nil {
+					caPool := x509.NewCertPool()
+					if caPool.AppendCertsFromPEM(caBytes) {
+						k8sCACertPool = caPool
+					}
+				}
+			}
 			return
 		}
 
@@ -200,7 +218,7 @@ func (a *API) getK8sClient() (*http.Client, string, error) {
 			if user.Name == currentUser {
 				// Check if user has token (some kubeconfigs use token auth)
 				if user.User.Token != "" {
-					token = user.User.Token
+					k8sBearerToken = strings.TrimSpace(user.User.Token)
 					k8sHasClientCert = false
 					return
 				}
@@ -273,15 +291,24 @@ func (a *API) getK8sClient() (*http.Client, string, error) {
 			MaxIdleConnsPerHost: 2,
 			IdleConnTimeout:     30 * time.Second,
 		},
-		Timeout: 60 * time.Second,
+		// Timeout is controlled per-request via context in handleK8sProxy.
+		Timeout: 0,
 	}
 
-	return client, token, nil
+	return client, k8sBearerToken, nil
 }
 
-// isWatchRequest checks if the request is a Kubernetes watch request
-func isWatchRequest(r *http.Request) bool {
-	return r.URL.Query().Get("watch") == "true"
+// isStreamingRequest checks if the request should be treated as a long-lived stream.
+func isStreamingRequest(r *http.Request) bool {
+	q := r.URL.Query()
+	if q.Get("watch") == "true" {
+		return true
+	}
+	if q.Get("follow") == "true" {
+		// kubectl logs -f
+		return true
+	}
+	return false
 }
 
 // flushingCopy copies data from src to dst, flushing after each chunk

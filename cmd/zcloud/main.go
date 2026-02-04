@@ -1,9 +1,11 @@
 package main
 
 import (
+	"bufio"
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -20,34 +22,50 @@ var (
 	auth      *client.Auth
 )
 
+// Set via -ldflags "-X main.Version=... -X main.BuildTime=..."
+var (
+	Version   = "dev"
+	BuildTime = "unknown"
+)
+
+func shortPrefix(s string, n int) string {
+	if n <= 0 {
+		return ""
+	}
+	if len(s) <= n {
+		return s
+	}
+	return s[:n]
+}
+
 func main() {
 	rootCmd := &cobra.Command{
 		Use:   "zcloud",
-		Short: "ZCloud CLI - Gestiona tu cluster k3s de forma remota",
-		Long: `ZCloud CLI permite conectarte y gestionar tu cluster k3s
-desde cualquier lugar de forma segura.
+		Short: "ZCloud CLI - Remote k3s cluster management",
+		Long: `ZCloud CLI lets you connect to and manage your k3s cluster securely
+from anywhere.
 
-Ejemplos:
-  zcloud init https://api.zyrak.cloud    # Configuración inicial
-  zcloud login                           # Iniciar sesión
-  zcloud status                          # Ver estado del cluster
-  zcloud k get pods -A                   # Ejecutar comandos kubectl
-  zcloud apply ./mi-app.yaml             # Desplegar manifests`,
+Examples:
+  zcloud init https://api.zyrak.cloud    # Initial setup
+  zcloud login                           # Login
+  zcloud status                          # Cluster/session status
+  zcloud k get pods -A                   # Run kubectl via proxy
+  zcloud apply ./my-app.yaml             # Apply manifests`,
 		PersistentPreRun: func(cmd *cobra.Command, args []string) {
-			// Cargar configuración (excepto para init)
+			// Load config (except for init/version).
 			if cmd.Name() != "init" && cmd.Name() != "version" {
 				var err error
 				cfg, err = client.LoadConfig(configDir)
 				if err != nil {
-					fmt.Fprintf(os.Stderr, "Error cargando configuración: %v\n", err)
+					fmt.Fprintf(os.Stderr, "Failed to load config: %v\n", err)
 					os.Exit(1)
 				}
 			}
 		},
 	}
 
-	// Flag global
-	rootCmd.PersistentFlags().StringVar(&configDir, "config-dir", "", "Directorio de configuración (default: ~/.zcloud)")
+	// Global flag
+	rootCmd.PersistentFlags().StringVar(&configDir, "config-dir", "", "Config directory (default: ~/.zcloud)")
 
 	// Comandos
 	rootCmd.AddCommand(
@@ -56,8 +74,6 @@ Ejemplos:
 		logoutCmd(),
 		totpCmd(),
 		statusCmd(),
-		startCmd(),
-		stopCmd(),
 		kubectlCmd(),
 		applyCmd(),
 		execCmd(),
@@ -76,17 +92,57 @@ Ejemplos:
 // initCmd - Comando de inicialización
 func initCmd() *cobra.Command {
 	var complete bool
+	var reset bool
+	var yes bool
 
 	cmd := &cobra.Command{
 		Use:   "init [server_url]",
-		Short: "Inicializa la configuración del cliente",
-		Long: `Configura el cliente zcloud por primera vez.
-Genera las claves del dispositivo y lo registra en el servidor.
+		Short: "Initialize client configuration",
+		Long: `Initializes the zcloud client.
+Generates device keys and registers the device with the server.
 
-Ejemplo:
+Example:
   zcloud init https://api.zyrak.cloud`,
 		Args: cobra.MaximumNArgs(1),
 		Run: func(cmd *cobra.Command, args []string) {
+			if complete && reset {
+				fmt.Fprintln(os.Stderr, "Error: --complete and --reset cannot be used together")
+				os.Exit(1)
+			}
+
+			if reset {
+				dir := configDir
+				if dir == "" {
+					dir = client.DefaultConfigDir()
+				}
+				if !yes {
+					fmt.Printf("This will delete %s\n", dir)
+					fmt.Print("Type 'yes' to confirm: ")
+					reader := bufio.NewReader(os.Stdin)
+					line, _ := reader.ReadString('\n')
+					line = strings.TrimSpace(line)
+					if line != "yes" {
+						fmt.Println("Cancelled.")
+						return
+					}
+				}
+
+				home, _ := os.UserHomeDir()
+				if home != "" {
+					cleanDir := filepath.Clean(dir)
+					if cleanDir == home || cleanDir == filepath.Clean(home)+string(os.PathSeparator) {
+						fmt.Fprintln(os.Stderr, "Error: refusing to delete home directory")
+						os.Exit(1)
+					}
+				}
+
+				if err := os.RemoveAll(dir); err != nil {
+					fmt.Fprintf(os.Stderr, "Failed to delete config: %v\n", err)
+					os.Exit(1)
+				}
+				fmt.Println("✅ Configuration deleted")
+			}
+
 			var err error
 			cfg, err = client.LoadConfig(configDir)
 			if err != nil {
@@ -101,7 +157,7 @@ Ejemplo:
 			}
 
 			if complete {
-				// Completar inicialización después de aprobación
+				// Complete initialization after approval.
 				if err := auth.CompleteInit(); err != nil {
 					fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 					os.Exit(1)
@@ -110,8 +166,8 @@ Ejemplo:
 			}
 
 			if len(args) == 0 {
-				fmt.Fprintln(os.Stderr, "Error: se requiere la URL del servidor")
-				fmt.Fprintln(os.Stderr, "Uso: zcloud init https://api.zyrak.cloud")
+				fmt.Fprintln(os.Stderr, "Error: server URL is required")
+				fmt.Fprintln(os.Stderr, "Usage: zcloud init https://api.zyrak.cloud")
 				os.Exit(1)
 			}
 
@@ -122,45 +178,117 @@ Ejemplo:
 		},
 	}
 
-	cmd.Flags().BoolVar(&complete, "complete", false, "Completar inicialización después de aprobación")
+	cmd.Flags().BoolVar(&complete, "complete", false, "Complete initialization after approval")
+	cmd.Flags().BoolVar(&reset, "reset", false, "Delete local configuration and re-initialize (dangerous)")
+	cmd.Flags().BoolVar(&yes, "yes", false, "Do not prompt for confirmation (useful with --reset)")
 
 	return cmd
 }
 
-// loginCmd - Comando de login (alias de start)
+// loginCmd logs into the server (optionally forcing renewal).
 func loginCmd() *cobra.Command {
-	return &cobra.Command{
+	var force bool
+
+	cmd := &cobra.Command{
 		Use:   "login",
-		Short: "Inicia sesión en el servidor (alias de 'start')",
+		Short: "Login to the server",
+		Long: `Authenticates with a TOTP code and generates a session token.
+
+The token is valid for 12 hours. After running this command,
+you can use 'kubectl' directly using the generated kubeconfig.
+
+Example:
+  zcloud login`,
 		Run: func(cmd *cobra.Command, args []string) {
+			// Ensure the device is configured.
+			if !cfg.IsInitialized() {
+				fmt.Fprintln(os.Stderr, "Error: device not configured")
+				fmt.Fprintln(os.Stderr, "   Run: zcloud init <server_url>")
+				os.Exit(1)
+			}
+
+			if !cfg.IsApproved() {
+				fmt.Fprintln(os.Stderr, "Error: device not approved")
+				fmt.Fprintln(os.Stderr, "   Run: zcloud init --complete")
+				os.Exit(1)
+			}
+
+			// If there's already a valid session, keep it unless --force.
+			if cfg.IsSessionValid() && !force {
+				expires := cfg.SessionExpiresIn()
+				fmt.Printf("✅ You already have an active session\n")
+				fmt.Printf("   ☸ Cluster: %s\n", getClusterName(cfg))
+				fmt.Printf("   ⏰ Expires in: %s\n", formatDuration(expires))
+				// Ensure kubeconfig exists/has the current token.
+				if err := cfg.GenerateKubeconfig(cfg.Session.Token); err == nil {
+					fmt.Printf("💡 Kubeconfig: %s\n", cfg.KubeconfigPath())
+				}
+				fmt.Println()
+				fmt.Println("💡 Use 'zcloud login --force' to renew")
+				return
+			}
+
 			auth, err := client.NewAuth(cfg)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				os.Exit(1)
 			}
 
+			// If --force and we already had a valid session, revoke it (best-effort) to avoid leaving stale tokens around.
+			if force && cfg.IsSessionValid() {
+				_ = auth.GetClient().Logout()
+				cfg.ClearSession()
+				_ = cfg.Save()
+			}
+
+			// Device info header
+			fmt.Println()
+			fmt.Println("🔐 ZCloud - Login")
+			fmt.Printf("   Device: %s (%s)\n", cfg.Device.Name, shortPrefix(cfg.Device.ID, 8))
+			fmt.Println()
+
 			if err := auth.Login(); err != nil {
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				os.Exit(1)
 			}
 
-			// Generar kubeconfig con el nuevo token
+			// Generate kubeconfig with the new token
 			if err := cfg.GenerateKubeconfig(cfg.Session.Token); err != nil {
-				fmt.Fprintf(os.Stderr, "Error generando kubeconfig: %v\n", err)
+				fmt.Fprintf(os.Stderr, "Failed to generate kubeconfig: %v\n", err)
 				os.Exit(1)
 			}
 
-			fmt.Printf("☸ Kubeconfig: %s\n", cfg.KubeconfigPath())
+			// Mark as trusted once TOTP has been set up successfully on this device.
+			if !cfg.Device.Trusted {
+				cfg.Device.Trusted = true
+				_ = cfg.Save()
+			}
+
+			// Result
+			fmt.Println()
+			fmt.Println("✅ Session started")
+			fmt.Printf("   ☸ Cluster: %s\n", getClusterName(cfg))
+			fmt.Printf("   ⏰ Valid until: %s (%s)\n",
+				cfg.Session.ExpiresAt.Format("15:04"),
+				formatDuration(cfg.SessionExpiresIn()))
+			fmt.Println()
+			fmt.Printf("💡 Kubeconfig: %s\n", cfg.KubeconfigPath())
+			fmt.Println("💡 You can now use 'kubectl' directly")
 		},
 	}
+
+	cmd.Flags().BoolVar(&force, "force", false, "Force a new session even if a valid one exists")
+	return cmd
 }
 
-// logoutCmd - Comando de logout
+// logoutCmd logs out and cleans up kubeconfig.
 func logoutCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "logout",
-		Short: "Cierra la sesión actual",
+		Short: "Logout and clean kubeconfig",
 		Run: func(cmd *cobra.Command, args []string) {
+			hadSession := cfg.HasValidSession()
+
 			auth, err := client.NewAuth(cfg)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
@@ -171,21 +299,31 @@ func logoutCmd() *cobra.Command {
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				os.Exit(1)
 			}
+
+			// Limpiar kubeconfig (best-effort)
+			_ = cfg.ClearKubeconfig()
+			if hadSession {
+				fmt.Println("👋 Logged out")
+			} else {
+				fmt.Println("No active session")
+			}
+			fmt.Println("   Kubeconfig cleaned")
 		},
 	}
 }
 
-// totpCmd - Comando de configuración TOTP
+// totpCmd configures TOTP for a user/persona.
 func totpCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "totp",
-		Short: "Configura TOTP para el dispositivo",
-		Long: `Configura la autenticación TOTP para un dispositivo aprobado.
-Debe ejecutarse después de que el administrador apruebe el dispositivo
-y antes del primer login.
+		Use:   "totp [enrollment_code]",
+		Short: "Set up TOTP for your user/persona",
+		Long: `Configures TOTP for a user/persona.
+Run this after your device is approved, before your first login
+(you only need to do this once per user).
 
-Ejemplo:
-  zcloud totp`,
+Example:
+  zcloud totp ABCD-EFGH-IJKL`,
+		Args: cobra.MaximumNArgs(1),
 		Run: func(cmd *cobra.Command, args []string) {
 			auth, err := client.NewAuth(cfg)
 			if err != nil {
@@ -193,7 +331,11 @@ Ejemplo:
 				os.Exit(1)
 			}
 
-			if err := auth.SetupTOTP(); err != nil {
+			code := ""
+			if len(args) == 1 {
+				code = args[0]
+			}
+			if err := auth.SetupTOTP(code); err != nil {
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				os.Exit(1)
 			}
@@ -201,16 +343,16 @@ Ejemplo:
 	}
 }
 
-// statusCmd - Comando de status
+// statusCmd shows cluster/session status.
 func statusCmd() *cobra.Command {
 	var checkOnly bool
 
 	cmd := &cobra.Command{
 		Use:   "status",
-		Short: "Muestra el estado del cluster y la sesión",
+		Short: "Show cluster/session status",
 		Run: func(cmd *cobra.Command, args []string) {
 			if checkOnly {
-				// Modo silencioso - solo exit code
+				// Quiet mode - only exit code
 				if cfg.IsSessionValid() {
 					os.Exit(0)
 				} else {
@@ -231,122 +373,11 @@ func statusCmd() *cobra.Command {
 		},
 	}
 
-	cmd.Flags().BoolVar(&checkOnly, "check-only", false, "Solo verificar sesión, sin output (exit code 0=válida, 1=inválida)")
+	cmd.Flags().BoolVar(&checkOnly, "check-only", false, "Only check session; no output (exit 0=valid, 1=invalid)")
 	return cmd
 }
 
-// startCmd - Comando de inicio de sesión diaria
-func startCmd() *cobra.Command {
-	var force bool
-
-	cmd := &cobra.Command{
-		Use:   "start",
-		Short: "Inicia sesión diaria con TOTP",
-		Long: `Autentica con código TOTP y genera token de sesión.
-
-El token es válido por 12 horas. Después de ejecutar este comando,
-puedes usar 'kubectl' directamente con el kubeconfig generado.
-
-Ejemplo:
-  zcloud start`,
-		Run: func(cmd *cobra.Command, args []string) {
-			// Verificar que el dispositivo está configurado
-			if !cfg.IsInitialized() {
-				fmt.Fprintln(os.Stderr, "❌ Dispositivo no configurado")
-				fmt.Fprintln(os.Stderr, "   Ejecuta: zcloud init <server_url>")
-				os.Exit(1)
-			}
-
-			if !cfg.IsApproved() {
-				fmt.Fprintln(os.Stderr, "❌ Dispositivo no aprobado")
-				fmt.Fprintln(os.Stderr, "   Ejecuta: zcloud init --complete")
-				os.Exit(1)
-			}
-
-			// Verificar si ya hay sesión válida
-			if cfg.IsSessionValid() && !force {
-				expires := cfg.SessionExpiresIn()
-				fmt.Printf("✅ Ya tienes una sesión activa\n")
-				fmt.Printf("   ☸ Cluster: %s\n", getClusterName(cfg))
-				fmt.Printf("   ⏰ Expira en: %s\n", formatDuration(expires))
-				fmt.Println()
-				fmt.Println("💡 Usa 'zcloud start --force' para renovar")
-				return
-			}
-
-			auth, err := client.NewAuth(cfg)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
-			}
-
-			// Mostrar info del dispositivo
-			fmt.Println()
-			fmt.Println("🔐 ZCloud - Inicio de sesión")
-			fmt.Printf("   Dispositivo: %s (%s)\n", cfg.Device.Name, cfg.Device.ID[:8])
-			fmt.Println()
-
-			// Hacer login (pide TOTP internamente)
-			if err := auth.Login(); err != nil {
-				fmt.Fprintf(os.Stderr, "\n❌ Error: %v\n", err)
-				os.Exit(1)
-			}
-
-			// Generar kubeconfig con el nuevo token
-			if err := cfg.GenerateKubeconfig(cfg.Session.Token); err != nil {
-				fmt.Fprintf(os.Stderr, "Error generando kubeconfig: %v\n", err)
-				os.Exit(1)
-			}
-
-			// Marcar como trusted si no lo estaba
-			if !cfg.Device.Trusted {
-				cfg.Device.Trusted = true
-				_ = cfg.Save()
-			}
-
-			// Mostrar resultado
-			fmt.Println()
-			fmt.Println("✅ Sesión iniciada")
-			fmt.Printf("   ☸ Cluster: %s\n", getClusterName(cfg))
-			fmt.Printf("   ⏰ Válida hasta: %s (%s)\n",
-				cfg.Session.ExpiresAt.Format("15:04"),
-				formatDuration(cfg.SessionExpiresIn()))
-			fmt.Println()
-			fmt.Printf("💡 Kubeconfig: %s\n", cfg.KubeconfigPath())
-			fmt.Println("💡 Ahora puedes usar 'kubectl' directamente")
-		},
-	}
-
-	cmd.Flags().BoolVar(&force, "force", false, "Forzar nueva sesión aunque ya exista una válida")
-	return cmd
-}
-
-// stopCmd - Comando de cierre de sesión
-func stopCmd() *cobra.Command {
-	return &cobra.Command{
-		Use:   "stop",
-		Short: "Cierra la sesión actual y limpia kubeconfig",
-		Run: func(cmd *cobra.Command, args []string) {
-			auth, err := client.NewAuth(cfg)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-				os.Exit(1)
-			}
-
-			// Logout en servidor
-			_ = auth.Logout()
-
-			// Limpiar kubeconfig
-			_ = cfg.ClearKubeconfig()
-
-			fmt.Println("👋 Sesión cerrada")
-			fmt.Println("   Token invalidado en servidor")
-			fmt.Println("   Kubeconfig limpiado")
-		},
-	}
-}
-
-// formatDuration formatea una duración legible
+// formatDuration formats a duration like "2h 10m" for display.
 func formatDuration(d time.Duration) string {
 	hours := int(d.Hours())
 	minutes := int(d.Minutes()) % 60
@@ -357,7 +388,7 @@ func formatDuration(d time.Duration) string {
 	return fmt.Sprintf("%dm", minutes)
 }
 
-// getClusterName obtiene el nombre del cluster
+// getClusterName resolves the display name for the cluster.
 func getClusterName(cfg *client.Config) string {
 	if cfg.Cluster.Name != "" {
 		return cfg.Cluster.Name
@@ -365,12 +396,12 @@ func getClusterName(cfg *client.Config) string {
 	return "zcloud-homelab"
 }
 
-// kubectlCmd - Proxy a kubectl
+// kubectlCmd proxies kubectl calls through the server.
 func kubectlCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:                "k [kubectl args...]",
-		Short:              "Ejecuta comandos kubectl en el cluster remoto",
-		Long:               `Proxy transparente a kubectl. Todos los argumentos se pasan directamente.`,
+		Short:              "Run kubectl commands against the remote cluster",
+		Long:               `Transparent kubectl proxy. All arguments are passed through.`,
 		DisableFlagParsing: true,
 		Run: func(cmd *cobra.Command, args []string) {
 			auth, err := client.NewAuth(cfg)
@@ -402,20 +433,20 @@ func kubectlCmd() *cobra.Command {
 	}
 }
 
-// applyCmd - Aplicar manifests
+// applyCmd applies manifests remotely (kubectl apply -f).
 func applyCmd() *cobra.Command {
 	var namespace string
 	var dryRun bool
 
 	cmd := &cobra.Command{
-		Use:   "apply [archivo.yaml]",
-		Short: "Aplica manifests de Kubernetes",
-		Long: `Aplica uno o más archivos YAML al cluster remoto.
+		Use:   "apply [file.yaml]",
+		Short: "Apply Kubernetes manifests",
+		Long: `Apply one or more YAML files to the remote cluster.
 
-Ejemplos:
+Examples:
   zcloud apply deployment.yaml
   zcloud apply ./k8s/
-  zcloud apply -f service.yaml -n my-namespace`,
+  zcloud apply service.yaml -n my-namespace`,
 		Args: cobra.MinimumNArgs(1),
 		Run: func(cmd *cobra.Command, args []string) {
 			auth, err := client.NewAuth(cfg)
@@ -429,23 +460,23 @@ Ejemplos:
 				os.Exit(1)
 			}
 
-			// Leer archivos
+			// Read manifests
 			var manifests []string
 			for _, path := range args {
 				content, err := readManifest(path)
 				if err != nil {
-					fmt.Fprintf(os.Stderr, "Error leyendo %s: %v\n", path, err)
+					fmt.Fprintf(os.Stderr, "Failed to read %s: %v\n", path, err)
 					os.Exit(1)
 				}
 				manifests = append(manifests, content...)
 			}
 
 			if len(manifests) == 0 {
-				fmt.Fprintln(os.Stderr, "No se encontraron manifests")
+				fmt.Fprintln(os.Stderr, "No manifests found")
 				os.Exit(1)
 			}
 
-			fmt.Printf("📤 Aplicando %d manifest(s)...\n", len(manifests))
+			fmt.Printf("📤 Applying %d manifest(s)...\n", len(manifests))
 
 			req := &protocol.ApplyRequest{
 				Manifests: manifests,
@@ -459,10 +490,10 @@ Ejemplos:
 				os.Exit(1)
 			}
 
-			// Mostrar resultados
+			// Print results
 			for _, r := range resp.Results {
 				if r.Error != "" {
-					fmt.Printf("❌ Error: %s\n", r.Error)
+					fmt.Printf("Error: %s\n", r.Error)
 				} else {
 					fmt.Printf("✅ %s/%s %s\n", r.Kind, r.Name, r.Action)
 				}
@@ -474,8 +505,8 @@ Ejemplos:
 		},
 	}
 
-	cmd.Flags().StringVarP(&namespace, "namespace", "n", "", "Namespace de destino")
-	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "Simular sin aplicar cambios")
+	cmd.Flags().StringVarP(&namespace, "namespace", "n", "", "Target namespace")
+	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "Dry-run (do not apply changes)")
 
 	return cmd
 }
@@ -483,13 +514,13 @@ Ejemplos:
 // execCmd - Ejecutar comandos remotos
 func execCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "exec [comando]",
-		Short: "Ejecuta un comando en el servidor",
-		Long: `Ejecuta un comando permitido en el servidor remoto.
+		Use:   "exec [command]",
+		Short: "Execute a command on the server",
+		Long: `Execute an allowed command on the remote server.
 
-Comandos permitidos: kubectl, helm, k3s
+Allowed commands: kubectl, helm, k3s
 
-Ejemplo:
+Example:
   zcloud exec kubectl get nodes`,
 		Args: cobra.MinimumNArgs(1),
 		Run: func(cmd *cobra.Command, args []string) {
@@ -531,19 +562,19 @@ Ejemplo:
 func adminCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "admin",
-		Short: "Comandos de administración",
+		Short: "Administration commands",
 	}
 
 	// Subcomando devices
 	devicesCmd := &cobra.Command{
 		Use:   "devices",
-		Short: "Gestionar dispositivos",
+		Short: "Manage devices",
 	}
 
 	// devices list
 	devicesCmd.AddCommand(&cobra.Command{
 		Use:   "list",
-		Short: "Listar dispositivos registrados",
+		Short: "List registered devices",
 		Run: func(cmd *cobra.Command, args []string) {
 			auth, err := client.NewAuth(cfg)
 			if err != nil {
@@ -563,12 +594,12 @@ func adminCmd() *cobra.Command {
 			}
 
 			if len(devices) == 0 {
-				fmt.Println("No hay dispositivos registrados")
+				fmt.Println("No devices registered")
 				return
 			}
 
 			fmt.Println()
-			fmt.Printf("%-14s %-15s %-20s %-10s\n", "ID", "NOMBRE", "ÚLTIMO ACCESO", "ESTADO")
+			fmt.Printf("%-14s %-20s %-20s %-10s\n", "ID", "NAME", "LAST ACCESS", "STATUS")
 			fmt.Println(strings.Repeat("-", 65))
 
 			for _, d := range devices {
@@ -587,18 +618,20 @@ func adminCmd() *cobra.Command {
 					status = "❌ " + status
 				}
 
-				fmt.Printf("%-14s %-15s %-20s %-10s\n", d.ID[:12], d.Name, lastAccess, status)
+				fmt.Printf("%-14s %-15s %-20s %-10s\n", shortPrefix(d.ID, 12), d.Name, lastAccess, status)
 			}
 			fmt.Println()
 		},
 	})
 
 	// devices approve
-	devicesCmd.AddCommand(&cobra.Command{
+	approveCmd := &cobra.Command{
 		Use:   "approve [device_id]",
-		Short: "Aprobar un dispositivo",
+		Short: "Approve a device",
 		Args:  cobra.ExactArgs(1),
 		Run: func(cmd *cobra.Command, args []string) {
+			userName, _ := cmd.Flags().GetString("user")
+
 			auth, err := client.NewAuth(cfg)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
@@ -610,19 +643,36 @@ func adminCmd() *cobra.Command {
 				os.Exit(1)
 			}
 
-			if err := auth.GetClient().ApproveDevice(args[0]); err != nil {
+			resp, err := auth.GetClient().ApproveDevice(args[0], userName)
+			if err != nil {
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				os.Exit(1)
 			}
 
-			fmt.Println("✅ Dispositivo aprobado")
+			fmt.Println("✅ Device approved")
+			if resp != nil && resp.UserName != "" {
+				fmt.Printf("👤 User: %s\n", resp.UserName)
+			}
+			if resp != nil && resp.EnrollmentCode != "" {
+				fmt.Println()
+				fmt.Println("🔐 TOTP enrollment code (one-time):")
+				fmt.Printf("   %s\n", resp.EnrollmentCode)
+				if !resp.EnrollmentExpiresAt.IsZero() {
+					fmt.Printf("   Expires: %s\n", resp.EnrollmentExpiresAt.Format("2006-01-02 15:04"))
+				}
+				fmt.Println()
+				fmt.Println("The user must run:")
+				fmt.Printf("   zcloud totp %s\n", resp.EnrollmentCode)
+			}
 		},
-	})
+	}
+	approveCmd.Flags().String("user", "", "User/persona name to assign this device to (per-user TOTP)")
+	devicesCmd.AddCommand(approveCmd)
 
 	// devices revoke
 	devicesCmd.AddCommand(&cobra.Command{
 		Use:   "revoke [device_id]",
-		Short: "Revocar un dispositivo",
+		Short: "Revoke a device",
 		Args:  cobra.ExactArgs(1),
 		Run: func(cmd *cobra.Command, args []string) {
 			auth, err := client.NewAuth(cfg)
@@ -641,7 +691,7 @@ func adminCmd() *cobra.Command {
 				os.Exit(1)
 			}
 
-			fmt.Println("✅ Dispositivo revocado")
+			fmt.Println("✅ Device revoked")
 		},
 	})
 
@@ -654,13 +704,12 @@ func adminCmd() *cobra.Command {
 func sshCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "ssh",
-		Short: "Abre una shell interactiva en el servidor",
-		Long: `Inicia una sesión SSH interactiva con el servidor ZCloud.
+		Short: "Open an interactive shell on the server",
+		Long: `Starts an interactive shell session against the ZCloud server.
 
-La conexión se realiza a través de WebSocket con autenticación JWT.
-Soporta redimensionamiento de terminal.
+The connection uses WebSocket with JWT authentication and supports terminal resize.
 
-Ejemplo:
+Example:
   zcloud ssh`,
 		Run: func(cmd *cobra.Command, args []string) {
 			auth, err := client.NewAuth(cfg)
@@ -687,15 +736,15 @@ Ejemplo:
 func portForwardCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "port-forward <host> <localPort>:<remotePort>",
-		Short: "Forward de puertos a servicios remotos",
-		Long: `Crea un túnel TCP desde un puerto local hacia un servicio remoto.
+		Short: "Port-forward to remote services",
+		Long: `Creates a TCP tunnel from a local port to a remote service.
 
-El host puede ser:
-  - Un servicio k8s: grafana.monitoring.svc
-  - localhost para servicios en el servidor
-  - Cualquier host accesible desde el servidor
+The host can be:
+  - A k8s service: grafana.monitoring.svc
+  - localhost for services on the server
+  - Any host reachable from the server
 
-Ejemplos:
+Examples:
   zcloud port-forward grafana.monitoring.svc 3000:3000
   zcloud port-forward localhost 8080:80
   zcloud port-forward victoria.monitoring.svc 8428:8428`,
@@ -712,23 +761,23 @@ Ejemplos:
 				os.Exit(1)
 			}
 
-			// Parsear host y puertos
+			// Parse host and ports
 			targetHost := args[0]
 			portParts := strings.Split(args[1], ":")
 			if len(portParts) != 2 {
-				fmt.Fprintln(os.Stderr, "Error: formato de puertos inválido, usa localPort:remotePort")
+				fmt.Fprintln(os.Stderr, "Error: invalid port mapping, use localPort:remotePort")
 				os.Exit(1)
 			}
 
 			localPort, err := strconv.Atoi(portParts[0])
 			if err != nil || localPort <= 0 || localPort > 65535 {
-				fmt.Fprintln(os.Stderr, "Error: puerto local inválido")
+				fmt.Fprintln(os.Stderr, "Error: invalid local port")
 				os.Exit(1)
 			}
 
 			remotePort, err := strconv.Atoi(portParts[1])
 			if err != nil || remotePort <= 0 || remotePort > 65535 {
-				fmt.Fprintln(os.Stderr, "Error: puerto remoto inválido")
+				fmt.Fprintln(os.Stderr, "Error: invalid remote port")
 				os.Exit(1)
 			}
 
@@ -746,16 +795,16 @@ func cpCmd() *cobra.Command {
 	var recursive bool
 
 	cmd := &cobra.Command{
-		Use:   "cp [origen] [destino]",
-		Short: "Copia archivos entre local y remoto",
-		Long: `Copia archivos entre tu máquina y el servidor.
+		Use:   "cp [source] [dest]",
+		Short: "Copy files between local and remote",
+		Long: `Copy files between your machine and the server.
 
-Usa el prefijo 'remote:' para indicar paths en el servidor.
+Use the 'remote:' prefix to indicate remote paths on the server.
 
-Ejemplos:
-  zcloud cp archivo.txt remote:/ruta/destino/
-  zcloud cp remote:/ruta/archivo.txt ./local/
-  zcloud cp -r ./carpeta/ remote:/destino/`,
+Examples:
+  zcloud cp file.txt remote:/path/to/dest/
+  zcloud cp remote:/path/to/file.txt ./local/
+  zcloud cp -r ./folder/ remote:/dest/`,
 		Args: cobra.ExactArgs(2),
 		Run: func(cmd *cobra.Command, args []string) {
 			auth, err := client.NewAuth(cfg)
@@ -772,12 +821,12 @@ Ejemplos:
 			srcRemote, srcPath := client.ParseRemotePath(args[0])
 			dstRemote, dstPath := client.ParseRemotePath(args[1])
 
-			// Validar que origen y destino no sean ambos remotos o ambos locales
+			// Validate that one side is remote and the other is local.
 			if srcRemote == dstRemote {
 				if srcRemote {
-					fmt.Fprintln(os.Stderr, "Error: copia remoto a remoto no soportada")
+					fmt.Fprintln(os.Stderr, "Error: remote-to-remote copy is not supported")
 				} else {
-					fmt.Fprintln(os.Stderr, "Error: usa 'cp' del sistema para copias locales")
+					fmt.Fprintln(os.Stderr, "Error: use your system 'cp' for local-to-local copies")
 				}
 				os.Exit(1)
 			}
@@ -786,12 +835,12 @@ Ejemplos:
 
 			if srcRemote {
 				// Download: remote -> local
-				fmt.Printf("📥 Descargando %s -> %s\n", srcPath, dstPath)
+				fmt.Printf("📥 Downloading %s -> %s\n", srcPath, dstPath)
 				if err := filesClient.Download(srcPath, dstPath); err != nil {
 					fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 					os.Exit(1)
 				}
-				fmt.Println("✅ Descarga completada")
+				fmt.Println("✅ Download completed")
 			} else {
 				// Upload: local -> remote
 				info, err := os.Stat(srcPath)
@@ -802,30 +851,30 @@ Ejemplos:
 
 				if info.IsDir() {
 					if !recursive {
-						fmt.Fprintln(os.Stderr, "Error: usa -r para copiar directorios")
+						fmt.Fprintln(os.Stderr, "Error: use -r to copy directories")
 						os.Exit(1)
 					}
-					fmt.Printf("📤 Subiendo directorio %s -> %s\n", srcPath, dstPath)
+					fmt.Printf("📤 Uploading directory %s -> %s\n", srcPath, dstPath)
 					results, err := filesClient.UploadDir(srcPath, dstPath)
 					if err != nil {
 						fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 						os.Exit(1)
 					}
-					fmt.Printf("✅ %d archivos subidos\n", len(results))
+					fmt.Printf("✅ %d files uploaded\n", len(results))
 				} else {
-					fmt.Printf("📤 Subiendo %s -> %s\n", srcPath, dstPath)
+					fmt.Printf("📤 Uploading %s -> %s\n", srcPath, dstPath)
 					result, err := filesClient.Upload(srcPath, dstPath)
 					if err != nil {
 						fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 						os.Exit(1)
 					}
-					fmt.Printf("✅ %s (%d bytes, SHA256: %s)\n", result.Path, result.Size, result.Checksum[:12])
+					fmt.Printf("✅ %s (%d bytes, SHA256: %s)\n", result.Path, result.Size, shortPrefix(result.Checksum, 12))
 				}
 			}
 		},
 	}
 
-	cmd.Flags().BoolVarP(&recursive, "recursive", "r", false, "Copiar directorios recursivamente")
+	cmd.Flags().BoolVarP(&recursive, "recursive", "r", false, "Copy directories recursively")
 
 	return cmd
 }
@@ -834,9 +883,9 @@ Ejemplos:
 func versionCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "version",
-		Short: "Muestra la versión de zcloud",
+		Short: "Print zcloud version",
 		Run: func(cmd *cobra.Command, args []string) {
-			fmt.Println("zcloud version 1.0.0")
+			fmt.Printf("zcloud %s (%s)\n", Version, BuildTime)
 		},
 	}
 }

@@ -2,11 +2,14 @@ package client
 
 import (
 	"bytes"
+	"context"
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
+	"strings"
 	"time"
 
 	"github.com/zyrak/zcloud/internal/shared/protocol"
@@ -30,7 +33,6 @@ func NewClient(config *Config) *Client {
 	return &Client{
 		config: config,
 		httpClient: &http.Client{
-			Timeout:   30 * time.Second,
 			Transport: transport,
 		},
 		baseURL: config.Server.URL,
@@ -39,6 +41,13 @@ func NewClient(config *Config) *Client {
 
 // doRequest realiza una petición HTTP
 func (c *Client) doRequest(method, path string, body interface{}, result interface{}) error {
+	// Per-endpoint timeouts (instead of a hard global client timeout) so long-running
+	// operations like apply/exec don't get cut at ~30 seconds.
+	timeout := 30 * time.Second
+	if strings.HasPrefix(path, "/api/v1/exec") || strings.HasPrefix(path, "/api/v1/apply") {
+		timeout = 10 * time.Minute
+	}
+
 	var bodyReader io.Reader
 	if body != nil {
 		data, err := json.Marshal(body)
@@ -48,7 +57,10 @@ func (c *Client) doRequest(method, path string, body interface{}, result interfa
 		bodyReader = bytes.NewReader(data)
 	}
 
-	req, err := http.NewRequest(method, c.baseURL+path, bodyReader)
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, bodyReader)
 	if err != nil {
 		return fmt.Errorf("failed to create request: %w", err)
 	}
@@ -107,7 +119,17 @@ func (c *Client) Register(req *protocol.RegisterRequest) (*protocol.RegisterResp
 // GetDeviceStatus obtiene el estado del dispositivo
 func (c *Client) GetDeviceStatus(deviceID string) (*protocol.RegisterResponse, error) {
 	var resp protocol.RegisterResponse
-	if err := c.doRequest("GET", "/api/v1/devices/status?device_id="+deviceID, nil, &resp); err != nil {
+	if err := c.doRequest("GET", "/api/v1/devices/status?device_id="+url.QueryEscape(deviceID), nil, &resp); err != nil {
+		return nil, err
+	}
+	return &resp, nil
+}
+
+// EnrollTOTP obtiene el secreto TOTP (una sola vez por usuario) usando un código one-time
+// y autenticación por firma de device key.
+func (c *Client) EnrollTOTP(req *protocol.TOTPEnrollRequest) (*protocol.TOTPEnrollResponse, error) {
+	var resp protocol.TOTPEnrollResponse
+	if err := c.doRequest("POST", "/api/v1/totp/enroll", req, &resp); err != nil {
 		return nil, err
 	}
 	return &resp, nil
@@ -163,9 +185,17 @@ func (c *Client) ListDevices() ([]protocol.DeviceInfo, error) {
 	return resp, nil
 }
 
-// ApproveDevice aprueba un dispositivo (admin)
-func (c *Client) ApproveDevice(deviceID string) error {
-	return c.doRequest("POST", "/api/v1/admin/devices/"+deviceID+"/approve", nil, nil)
+// ApproveDevice aprueba un dispositivo (admin) y devuelve el código de enrolamiento TOTP (one-time).
+func (c *Client) ApproveDevice(deviceID string, userName string) (*protocol.ApproveDeviceResponse, error) {
+	path := "/api/v1/admin/devices/" + deviceID + "/approve"
+	if userName != "" {
+		path += "?user=" + url.QueryEscape(userName)
+	}
+	var resp protocol.ApproveDeviceResponse
+	if err := c.doRequest("POST", path, nil, &resp); err != nil {
+		return nil, err
+	}
+	return &resp, nil
 }
 
 // RevokeDevice revoca un dispositivo (admin)

@@ -10,6 +10,7 @@ import (
 	"io"
 	"mime/multipart"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -159,7 +160,7 @@ func (f *FilesClient) UploadDir(localDir, remoteDir string) ([]protocol.FileUplo
 // Download descarga un archivo del servidor
 func (f *FilesClient) Download(remotePath, localPath string) error {
 	// Crear request
-	req, err := http.NewRequest("GET", f.baseURL+"/api/v1/files/download?path="+remotePath, nil)
+	req, err := http.NewRequest("GET", f.baseURL+"/api/v1/files/download?path="+url.QueryEscape(remotePath), nil)
 	if err != nil {
 		return fmt.Errorf("failed to create request: %w", err)
 	}
@@ -210,19 +211,19 @@ func (f *FilesClient) Download(remotePath, localPath string) error {
 	}
 
 	checksum := hex.EncodeToString(hasher.Sum(nil))
-	fmt.Printf("  📥 Downloaded %d bytes (SHA256: %s)\n", size, checksum[:12])
+	fmt.Printf("  📥 Downloaded %d bytes (SHA256: %s)\n", size, safePrefix(checksum, 12))
 
 	return nil
 }
 
 // List lista archivos en un directorio remoto
 func (f *FilesClient) List(remotePath string, recursive bool) (*protocol.FileListResponse, error) {
-	url := fmt.Sprintf("%s/api/v1/files/list?path=%s", f.baseURL, remotePath)
+	u := fmt.Sprintf("%s/api/v1/files/list?path=%s", f.baseURL, url.QueryEscape(remotePath))
 	if recursive {
-		url += "&recursive=true"
+		u += "&recursive=true"
 	}
 
-	req, err := http.NewRequest("GET", url, nil)
+	req, err := http.NewRequest("GET", u, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}

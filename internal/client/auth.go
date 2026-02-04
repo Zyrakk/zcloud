@@ -15,21 +15,21 @@ import (
 	"github.com/zyrak/zcloud/internal/shared/protocol"
 )
 
-// Auth maneja la autenticación del cliente
+// Auth handles client-side authentication flows.
 type Auth struct {
 	config  *Config
 	client  *Client
 	keyPair *crypto.KeyPair
 }
 
-// NewAuth crea un nuevo manejador de autenticación
+// NewAuth creates a new Auth handler.
 func NewAuth(config *Config) (*Auth, error) {
 	auth := &Auth{
 		config: config,
 		client: NewClient(config),
 	}
 
-	// Cargar keypair si existe
+	// Load existing keypair if present.
 	if config.IsInitialized() {
 		kp, err := crypto.LoadFromFiles(config.ConfigDir())
 		if err == nil {
@@ -40,43 +40,43 @@ func NewAuth(config *Config) (*Auth, error) {
 	return auth, nil
 }
 
-// Init inicializa un nuevo dispositivo
+// Init initializes a new device.
 func (a *Auth) Init(serverURL string) error {
-	// Verificar si ya está inicializado
+	// Check if already initialized.
 	if a.config.IsInitialized() {
-		return fmt.Errorf("ya existe una configuración en %s\nUsa 'zcloud reset' para reiniciar", a.config.ConfigDir())
+		return fmt.Errorf("configuration already exists in %s\nUse 'zcloud init --reset <server_url>' to re-initialize", a.config.ConfigDir())
 	}
 
-	fmt.Println("🔧 Configuración inicial de zcloud")
+	fmt.Println("🔧 ZCloud initial setup")
 	fmt.Println()
 
-	// Configurar servidor
+	// Configure server
 	a.config.Server.URL = strings.TrimSuffix(serverURL, "/")
 	a.client = NewClient(a.config)
 
-	// Generar keypair
-	fmt.Println("   Generando par de claves del dispositivo...")
+	// Generate keypair
+	fmt.Println("   Generating device key pair...")
 	kp, err := crypto.GenerateKeyPair()
 	if err != nil {
 		return fmt.Errorf("failed to generate keypair: %w", err)
 	}
 	a.keyPair = kp
 
-	// Guardar claves
+	// Save keys
 	if err := kp.SaveToFiles(a.config.ConfigDir()); err != nil {
 		return fmt.Errorf("failed to save keys: %w", err)
 	}
 
-	// Obtener nombre del dispositivo
+	// Device name
 	hostname, _ := os.Hostname()
-	deviceName := promptString(fmt.Sprintf("   Nombre del dispositivo [%s]: ", hostname))
+	deviceName := promptString(fmt.Sprintf("   Device name [%s]: ", hostname))
 	if deviceName == "" {
 		deviceName = hostname
 	}
 
-	// Registrar dispositivo
+	// Register device
 	fmt.Println()
-	fmt.Println("   Registrando dispositivo en el servidor...")
+	fmt.Println("   Registering device with the server...")
 
 	req := &protocol.RegisterRequest{
 		DeviceName: deviceName,
@@ -90,7 +90,7 @@ func (a *Auth) Init(serverURL string) error {
 		return fmt.Errorf("failed to register device: %w", err)
 	}
 
-	// Guardar configuración
+	// Save config
 	a.config.Device.ID = resp.DeviceID
 	a.config.Device.Name = deviceName
 	a.config.Device.Approved = resp.Status == protocol.DeviceStatusApproved
@@ -104,38 +104,47 @@ func (a *Auth) Init(serverURL string) error {
 	fmt.Println()
 
 	if resp.Status == protocol.DeviceStatusPending {
-		fmt.Println("   ⏳ Dispositivo registrado, pendiente de aprobación")
+		fmt.Println("   ⏳ Device registered, awaiting approval")
 		fmt.Println()
-		fmt.Println("   El administrador debe aprobar este dispositivo en el servidor con:")
+		fmt.Println("   An admin must approve this device on the server with:")
 		fmt.Printf("   zcloud-server admin devices approve %s\n", resp.DeviceID)
 		fmt.Println()
-		fmt.Println("   Después ejecuta: zcloud init --complete")
+		fmt.Println("   Then run: zcloud init --complete")
 	} else if resp.Status == protocol.DeviceStatusApproved {
-		// Auto-approved (require_approval=false en servidor)
+		// Auto-approved (require_approval=false on server)
 		a.config.Device.Approved = true
 		fmt.Println()
-		fmt.Println("   ✅ Dispositivo aprobado automáticamente")
-		fmt.Println()
-		fmt.Println("   Ahora debes configurar TOTP con: zcloud totp")
+		fmt.Println("   ✅ Device auto-approved")
+		if resp.EnrollmentCode != "" {
+			fmt.Println()
+			fmt.Printf("   🔐 TOTP enrollment code: %s\n", resp.EnrollmentCode)
+			fmt.Printf("   ⏰ Expires: %s\n", resp.EnrollmentExpiresAt.Format("2006-01-02 15:04"))
+			fmt.Println()
+			fmt.Println("   Now set up TOTP with:")
+			fmt.Printf("   zcloud totp %s\n", resp.EnrollmentCode)
+		} else {
+			fmt.Println()
+			fmt.Println("   Now you must set up TOTP with: zcloud totp")
+		}
 	}
 
 	fmt.Println()
-	fmt.Printf("   ✅ Configuración guardada en %s\n", a.config.ConfigDir())
+	fmt.Printf("   ✅ Configuration saved to %s\n", a.config.ConfigDir())
 
 	return nil
 }
 
-// CompleteInit completa la inicialización después de la aprobación
+// CompleteInit completes initialization after approval.
 func (a *Auth) CompleteInit() error {
 	if !a.config.IsInitialized() {
-		return fmt.Errorf("dispositivo no inicializado, ejecuta 'zcloud init' primero")
+		return fmt.Errorf("device not initialized; run 'zcloud init' first")
 	}
 
 	if a.config.IsApproved() {
-		return fmt.Errorf("dispositivo ya está aprobado y configurado")
+		return fmt.Errorf("device is already approved and configured")
 	}
 
-	fmt.Println("🔄 Verificando estado de aprobación...")
+	fmt.Println("🔄 Checking approval status...")
 
 	resp, err := a.client.GetDeviceStatus(a.config.Device.ID)
 	if err != nil {
@@ -143,15 +152,15 @@ func (a *Auth) CompleteInit() error {
 	}
 
 	if resp.Status == protocol.DeviceStatusPending {
-		return fmt.Errorf("dispositivo aún pendiente de aprobación")
+		return fmt.Errorf("device is still pending approval")
 	}
 
 	if resp.Status == protocol.DeviceStatusRevoked {
-		return fmt.Errorf("dispositivo ha sido revocado")
+		return fmt.Errorf("device has been revoked")
 	}
 
 	fmt.Println()
-	fmt.Println("   ✅ Dispositivo aprobado")
+	fmt.Println("   ✅ Device approved")
 	fmt.Println()
 
 	a.config.Device.Approved = true
@@ -159,77 +168,109 @@ func (a *Auth) CompleteInit() error {
 		return fmt.Errorf("failed to save config: %w", err)
 	}
 
-	fmt.Println("   🎉 Configuración completa!")
+	fmt.Println("   🎉 Setup complete!")
 	fmt.Println()
-	fmt.Println("   Ahora debes configurar TOTP con: zcloud totp")
-	fmt.Println("   Después podrás iniciar sesión con: zcloud login")
+	fmt.Println("   Now set up TOTP with: zcloud totp")
+	fmt.Println("   Then you can log in with: zcloud login")
 
 	return nil
 }
 
-// SetupTOTP configura TOTP para un dispositivo aprobado
-func (a *Auth) SetupTOTP() error {
+// SetupTOTP configures TOTP for a user/persona (one-time) using an enrollment code.
+func (a *Auth) SetupTOTP(enrollmentCode string) error {
 	if !a.config.IsInitialized() {
-		return fmt.Errorf("dispositivo no inicializado, ejecuta 'zcloud init' primero")
+		return fmt.Errorf("device not initialized; run 'zcloud init' first")
 	}
 
 	if !a.config.IsApproved() {
-		return fmt.Errorf("dispositivo no aprobado, ejecuta 'zcloud init --complete' primero")
+		return fmt.Errorf("device not approved; run 'zcloud init --complete' first")
 	}
 
-	fmt.Println("🔐 Configuración TOTP")
-	fmt.Printf("   Dispositivo: %s (%s)\n", a.config.Device.Name, a.config.Device.ID[:8])
+	fmt.Println("🔐 TOTP setup")
+	fmt.Printf("   Device: %s (%s)\n", a.config.Device.Name, safePrefix(a.config.Device.ID, 8))
 	fmt.Println()
 
-	// Obtener el secreto TOTP del servidor
-	resp, err := a.client.GetDeviceStatus(a.config.Device.ID)
+	if strings.TrimSpace(enrollmentCode) == "" {
+		fmt.Print("   Enter the enrollment code (e.g. ABCD-EFGH-IJKL): ")
+		enrollmentCode = promptString("")
+	}
+
+	// Cargar keypair
+	if a.keyPair == nil {
+		kp, err := crypto.LoadFromFiles(a.config.ConfigDir())
+		if err != nil {
+			return fmt.Errorf("failed to load keys: %w", err)
+		}
+		a.keyPair = kp
+	}
+
+	timestamp := time.Now().Unix()
+	msgToSign := fmt.Sprintf("totp_enroll:%d:%s", timestamp, strings.TrimSpace(enrollmentCode))
+	signature := a.keyPair.Sign([]byte(msgToSign))
+
+	enrollResp, err := a.client.EnrollTOTP(&protocol.TOTPEnrollRequest{
+		DeviceID:       a.config.Device.ID,
+		Timestamp:      timestamp,
+		Signature:      signature,
+		EnrollmentCode: strings.TrimSpace(enrollmentCode),
+	})
 	if err != nil {
-		return fmt.Errorf("failed to get TOTP secret: %w", err)
+		return fmt.Errorf("failed to enroll TOTP: %w", err)
 	}
 
-	if resp.TOTPSecret == "" {
-		return fmt.Errorf("TOTP secret not available - contacta al administrador")
+	if enrollResp.TOTPSecret == "" {
+		// Typical case for devices belonging to a user that already configured TOTP earlier.
+		if enrollResp.Message != "" {
+			fmt.Println("   ✅ " + enrollResp.Message)
+		} else {
+			fmt.Println("   ✅ TOTP is already configured for this user")
+		}
+		return nil
 	}
 
-	fmt.Println("   Configura tu aplicación TOTP (Google Authenticator, Authy, etc.):")
+	fmt.Println("   Configure your TOTP app (Google Authenticator, Aegis, etc.):")
 	fmt.Println()
-	fmt.Printf("   Secret: %s\n", resp.TOTPSecret)
+	fmt.Printf("   Secret: %s\n", enrollResp.TOTPSecret)
 	fmt.Println()
 
-	// Mostrar QR si está disponible
-	if resp.TOTPQR != "" {
-		fmt.Println("   (QR code disponible - usa el secret manual arriba)")
+	if enrollResp.TOTPQR != "" {
+		fmt.Println("   (QR code available in base64 - use the manual secret above)")
 	}
 
 	// Verificar que el TOTP funciona
 	fmt.Println()
-	fmt.Print("   Introduce el código TOTP para verificar: ")
+	fmt.Print("   Enter a TOTP code to verify: ")
 	code := readTOTP()
 
-	if !crypto.ValidateTOTP(resp.TOTPSecret, code) {
-		return fmt.Errorf("código TOTP inválido")
+	if !crypto.ValidateTOTP(enrollResp.TOTPSecret, code) {
+		return fmt.Errorf("invalid TOTP code")
 	}
 
 	fmt.Println()
-	fmt.Println("   ✅ TOTP configurado correctamente")
+	fmt.Println("   ✅ TOTP configured successfully")
 	fmt.Println()
-	fmt.Println("   Ahora puedes iniciar sesión con: zcloud login")
+	fmt.Println("   You can now log in with: zcloud login")
+
+	// Marcar el dispositivo como trusted (UX)
+	if !a.config.Device.Trusted {
+		a.config.Device.Trusted = true
+		_ = a.config.Save()
+	}
 
 	return nil
 }
 
-// Login inicia sesión
+// Login performs an interactive login (prompts for TOTP).
 func (a *Auth) Login() error {
 	if !a.config.IsInitialized() {
-		return fmt.Errorf("dispositivo no inicializado, ejecuta 'zcloud init' primero")
+		return fmt.Errorf("device not initialized; run 'zcloud init' first")
 	}
 
 	if !a.config.IsApproved() {
-		return fmt.Errorf("dispositivo no aprobado, ejecuta 'zcloud init --complete'")
+		return fmt.Errorf("device not approved; run 'zcloud init --complete'")
 	}
 
 	if a.config.HasValidSession() {
-		fmt.Printf("✅ Sesión activa (válida hasta %s)\n", a.config.Session.ExpiresAt.Format("15:04"))
 		return nil
 	}
 
@@ -242,9 +283,7 @@ func (a *Auth) Login() error {
 		a.keyPair = kp
 	}
 
-	fmt.Printf("🔐 Device: %s (%s)\n", a.config.Device.Name, a.config.Device.ID[:8])
-
-	// Pedir código TOTP
+	// Prompt for TOTP (no echo if possible)
 	fmt.Print("🔑 TOTP: ")
 	totpCode := readTOTP()
 
@@ -272,15 +311,12 @@ func (a *Auth) Login() error {
 		return fmt.Errorf("failed to save session: %w", err)
 	}
 
-	fmt.Printf("✅ Sesión iniciada (válida hasta %s)\n", resp.ExpiresAt.Format("15:04"))
-
 	return nil
 }
 
-// Logout cierra la sesión
+// Logout logs out (best-effort server revoke) and clears local session.
 func (a *Auth) Logout() error {
 	if !a.config.HasValidSession() {
-		fmt.Println("No hay sesión activa")
 		return nil
 	}
 
@@ -293,47 +329,46 @@ func (a *Auth) Logout() error {
 		return fmt.Errorf("failed to save config: %w", err)
 	}
 
-	fmt.Println("👋 Sesión cerrada")
 	return nil
 }
 
-// Status muestra el estado actual
+// Status prints current status.
 func (a *Auth) Status() error {
 	fmt.Println()
 
 	if !a.config.IsInitialized() {
-		fmt.Println("❌ Dispositivo no inicializado")
-		fmt.Println("   Ejecuta: zcloud init <server_url>")
+		fmt.Println("❌ Device not initialized")
+		fmt.Println("   Run: zcloud init <server_url>")
 		return nil
 	}
 
-	fmt.Printf("📱 Dispositivo: %s (%s)\n", a.config.Device.Name, a.config.Device.ID[:8])
-	fmt.Printf("🌐 Servidor:    %s\n", a.config.Server.URL)
+	fmt.Printf("📱 Device:  %s (%s)\n", a.config.Device.Name, safePrefix(a.config.Device.ID, 8))
+	fmt.Printf("🌐 Server:  %s\n", a.config.Server.URL)
 
 	if !a.config.IsApproved() {
-		fmt.Println("⏳ Estado:      Pendiente de aprobación")
+		fmt.Println("⏳ Status:  pending approval")
 		return nil
 	}
 
 	if !a.config.HasValidSession() {
-		fmt.Println("🔒 Sesión:      No activa")
-		fmt.Println("   Ejecuta: zcloud login")
+		fmt.Println("🔒 Session: not active")
+		fmt.Println("   Run: zcloud login")
 		return nil
 	}
 
-	fmt.Printf("✅ Sesión:      Activa (hasta %s)\n", a.config.Session.ExpiresAt.Format("15:04"))
+	fmt.Printf("✅ Session: active (until %s)\n", a.config.Session.ExpiresAt.Format("15:04"))
 
 	// Obtener estado del cluster
 	status, err := a.client.GetStatus()
 	if err != nil {
-		fmt.Printf("⚠️  Cluster:     Error: %v\n", err)
+		fmt.Printf("⚠️  Cluster: error: %v\n", err)
 		return nil
 	}
 
 	fmt.Println()
-	fmt.Printf("☸️  Cluster:     %s\n", status.ClusterName)
+	fmt.Printf("☸️  Cluster: %s\n", status.ClusterName)
 	fmt.Println()
-	fmt.Println("   NODOS")
+	fmt.Println("   NODES")
 	for _, node := range status.Nodes {
 		statusIcon := "✅"
 		if node.Status != "Ready" {
@@ -345,10 +380,10 @@ func (a *Auth) Status() error {
 	return nil
 }
 
-// EnsureSession verifica que hay una sesión válida
+// EnsureSession ensures there is a valid session.
 func (a *Auth) EnsureSession() error {
 	if !a.config.HasValidSession() {
-		return fmt.Errorf("no hay sesión activa, ejecuta 'zcloud login'")
+		return fmt.Errorf("no active session; run 'zcloud login'")
 	}
 	return nil
 }
@@ -356,6 +391,16 @@ func (a *Auth) EnsureSession() error {
 // GetClient devuelve el cliente HTTP
 func (a *Auth) GetClient() *Client {
 	return a.client
+}
+
+func safePrefix(s string, n int) string {
+	if n <= 0 {
+		return ""
+	}
+	if len(s) <= n {
+		return s
+	}
+	return s[:n]
 }
 
 // Helper functions
