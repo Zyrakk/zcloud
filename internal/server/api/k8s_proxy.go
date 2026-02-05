@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"strings"
@@ -16,14 +17,15 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// k8sClientConfig caches the TLS config to avoid re-parsing kubeconfig
+// k8sClientConfig caches the TLS config AND the HTTP client (singleton)
 var (
-	k8sConfigOnce  sync.Once
-	k8sConfigErr   error
-	k8sCACertPool  *x509.CertPool
-	k8sClientCert  tls.Certificate
+	k8sConfigOnce    sync.Once
+	k8sConfigErr     error
+	k8sCACertPool    *x509.CertPool
+	k8sClientCert    tls.Certificate
 	k8sHasClientCert bool
-	k8sBearerToken string
+	k8sBearerToken   string
+	k8sHTTPClient    *http.Client // Singleton HTTP client with connection pooling
 )
 
 // kubeconfigFile represents the structure of a kubeconfig file
@@ -104,7 +106,7 @@ func (a *API) handleK8sProxy(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Get or create HTTP client with proper authentication
+	// Get the singleton HTTP client with proper authentication
 	client, token, err := a.getK8sClient()
 	if err != nil {
 		http.Error(w, "failed to create k8s client: "+err.Error(), http.StatusInternalServerError)
@@ -144,8 +146,8 @@ func (a *API) handleK8sProxy(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// getK8sClient creates an HTTP client with proper TLS configuration for k8s auth
-// It caches the TLS config but creates a new client for each request to avoid connection reuse issues
+// getK8sClient returns the singleton HTTP client with proper TLS configuration for k8s auth.
+// The client is created once and reused for all requests, with a large connection pool.
 func (a *API) getK8sClient() (*http.Client, string, error) {
 	k8sConfigOnce.Do(func() {
 		// Load CA certificate if specified in config
@@ -182,120 +184,138 @@ func (a *API) getK8sClient() (*http.Client, string, error) {
 					}
 				}
 			}
-			return
-		}
-
-		// Not in-cluster - parse kubeconfig
-		kubeconfigPath := a.config.KubeconfigPath
-		if kubeconfigPath == "" {
-			k8sConfigErr = os.ErrNotExist
-			return
-		}
-
-		data, err := os.ReadFile(kubeconfigPath)
-		if err != nil {
-			k8sConfigErr = err
-			return
-		}
-
-		var kubeconfig kubeconfigFile
-		if err := yaml.Unmarshal(data, &kubeconfig); err != nil {
-			k8sConfigErr = err
-			return
-		}
-
-		// Find current context's user
-		var currentUser string
-		for _, ctx := range kubeconfig.Contexts {
-			if ctx.Name == kubeconfig.CurrentContext {
-				currentUser = ctx.Context.User
-				break
+		} else {
+			// Not in-cluster - parse kubeconfig
+			kubeconfigPath := a.config.KubeconfigPath
+			if kubeconfigPath == "" {
+				k8sConfigErr = os.ErrNotExist
+				return
 			}
-		}
 
-		// Find user credentials
-		for _, user := range kubeconfig.Users {
-			if user.Name == currentUser {
-				// Check if user has token (some kubeconfigs use token auth)
-				if user.User.Token != "" {
-					k8sBearerToken = strings.TrimSpace(user.User.Token)
-					k8sHasClientCert = false
-					return
+			data, err := os.ReadFile(kubeconfigPath)
+			if err != nil {
+				k8sConfigErr = err
+				return
+			}
+
+			var kubeconfig kubeconfigFile
+			if err := yaml.Unmarshal(data, &kubeconfig); err != nil {
+				k8sConfigErr = err
+				return
+			}
+
+			// Find current context's user
+			var currentUser string
+			for _, ctx := range kubeconfig.Contexts {
+				if ctx.Name == kubeconfig.CurrentContext {
+					currentUser = ctx.Context.User
+					break
 				}
+			}
 
-				// Use client certificate authentication (k3s default)
-				if user.User.ClientCertificateData != "" && user.User.ClientKeyData != "" {
-					certData, err := base64.StdEncoding.DecodeString(user.User.ClientCertificateData)
-					if err != nil {
-						k8sConfigErr = err
-						return
+			// Find user credentials
+			for _, user := range kubeconfig.Users {
+				if user.Name == currentUser {
+					// Check if user has token (some kubeconfigs use token auth)
+					if user.User.Token != "" {
+						k8sBearerToken = strings.TrimSpace(user.User.Token)
+						k8sHasClientCert = false
+						break
 					}
 
-					keyData, err := base64.StdEncoding.DecodeString(user.User.ClientKeyData)
-					if err != nil {
-						k8sConfigErr = err
-						return
-					}
+					// Use client certificate authentication (k3s default)
+					if user.User.ClientCertificateData != "" && user.User.ClientKeyData != "" {
+						certData, err := base64.StdEncoding.DecodeString(user.User.ClientCertificateData)
+						if err != nil {
+							k8sConfigErr = err
+							return
+						}
 
-					cert, err := tls.X509KeyPair(certData, keyData)
-					if err != nil {
-						k8sConfigErr = err
-						return
-					}
+						keyData, err := base64.StdEncoding.DecodeString(user.User.ClientKeyData)
+						if err != nil {
+							k8sConfigErr = err
+							return
+						}
 
-					k8sClientCert = cert
-					k8sHasClientCert = true
+						cert, err := tls.X509KeyPair(certData, keyData)
+						if err != nil {
+							k8sConfigErr = err
+							return
+						}
 
-					// Try to load CA from kubeconfig if not specified in server config
-					if k8sCACertPool == nil {
-						for _, cluster := range kubeconfig.Clusters {
-							if cluster.Cluster.CertificateAuthorityData != "" {
-								caData, err := base64.StdEncoding.DecodeString(cluster.Cluster.CertificateAuthorityData)
-								if err == nil {
-									caPool := x509.NewCertPool()
-									if caPool.AppendCertsFromPEM(caData) {
-										k8sCACertPool = caPool
-										break
+						k8sClientCert = cert
+						k8sHasClientCert = true
+
+						// Try to load CA from kubeconfig if not specified in server config
+						if k8sCACertPool == nil {
+							for _, cluster := range kubeconfig.Clusters {
+								if cluster.Cluster.CertificateAuthorityData != "" {
+									caData, err := base64.StdEncoding.DecodeString(cluster.Cluster.CertificateAuthorityData)
+									if err == nil {
+										caPool := x509.NewCertPool()
+										if caPool.AppendCertsFromPEM(caData) {
+											k8sCACertPool = caPool
+											break
+										}
 									}
 								}
 							}
 						}
+						break
 					}
-					return
 				}
 			}
 		}
 
-		k8sConfigErr = os.ErrNotExist
+		if k8sConfigErr != nil {
+			return
+		}
+
+		// Create TLS config
+		tlsConfig := &tls.Config{
+			InsecureSkipVerify: false,
+		}
+		if k8sCACertPool != nil {
+			tlsConfig.RootCAs = k8sCACertPool
+		}
+		if k8sHasClientCert {
+			tlsConfig.Certificates = []tls.Certificate{k8sClientCert}
+		}
+
+		// Create SINGLETON HTTP client with optimized connection pooling for high concurrency
+		// This is the key fix: reuse connections across all requests
+		k8sHTTPClient = &http.Client{
+			Transport: &http.Transport{
+				TLSClientConfig: tlsConfig,
+				// Connection pooling optimized for Helm's parallel requests
+				MaxIdleConns:        100,
+				MaxIdleConnsPerHost: 100, // Allow many idle connections to k8s API
+				MaxConnsPerHost:     0,   // No limit on concurrent connections
+				IdleConnTimeout:     90 * time.Second,
+				// Timeouts for connection establishment
+				DialContext: (&net.Dialer{
+					Timeout:   30 * time.Second,
+					KeepAlive: 30 * time.Second,
+				}).DialContext,
+				TLSHandshakeTimeout:   10 * time.Second,
+				ExpectContinueTimeout: 1 * time.Second,
+				// Disable HTTP/2 - k8s API server handles HTTP/1.1 better for concurrent requests
+				// and Helm specifically has issues with HTTP/2 connection reuse
+				ForceAttemptHTTP2: false,
+				TLSNextProto:      make(map[string]func(authority string, c *tls.Conn) http.RoundTripper),
+			},
+			// Timeout is controlled per-request via context in handleK8sProxy.
+			Timeout: 0,
+		}
+
+		log.Printf("K8s proxy client initialized with connection pooling (MaxIdleConnsPerHost=100)")
 	})
 
 	if k8sConfigErr != nil {
 		return nil, "", k8sConfigErr
 	}
 
-	// Create a new HTTP client for each request with fresh TLS config
-	tlsConfig := &tls.Config{InsecureSkipVerify: false}
-	if k8sCACertPool != nil {
-		tlsConfig.RootCAs = k8sCACertPool
-	}
-	if k8sHasClientCert {
-		tlsConfig.Certificates = []tls.Certificate{k8sClientCert}
-	}
-
-	client := &http.Client{
-		Transport: &http.Transport{
-			TLSClientConfig: tlsConfig,
-			// Disable HTTP/2 to avoid connection reuse issues with Helm
-			TLSNextProto: make(map[string]func(authority string, c *tls.Conn) http.RoundTripper),
-			// Use shorter idle timeout to avoid stale connections
-			MaxIdleConnsPerHost: 2,
-			IdleConnTimeout:     30 * time.Second,
-		},
-		// Timeout is controlled per-request via context in handleK8sProxy.
-		Timeout: 0,
-	}
-
-	return client, k8sBearerToken, nil
+	return k8sHTTPClient, k8sBearerToken, nil
 }
 
 // isStreamingRequest checks if the request should be treated as a long-lived stream.

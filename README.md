@@ -16,10 +16,10 @@ Remote management system for k3s clusters. It lets you connect to and operate yo
 └─────────────────────────────┘          └──────────┬──────────────────┘
                                                     │
                                                     ▼
-                                         ┌─────────────────────┐
-                                         │  k3s cluster        │
-                                         │  (4 nodes via VPN)  │
-                                         └─────────────────────┘
+                                         ┌─────────────────────────────┐
+                                         │  k3s cluster                │
+                                         │  (4 nodes via VPN)          │
+                                         └─────────────────────────────┘
 ```
 
 ## 🔐 Security
@@ -32,12 +32,13 @@ Remote management system for k3s clusters. It lets you connect to and operate yo
 | 4 | JWT (12h TTL) | Temporary session |
 | 5 | Token Revocation | Immediate session invalidation |
 | 6 | Security Headers | XSS/clickjacking mitigation, etc. |
-| 7 | Rate limiting | Abuse prevention |
+| 7 | Rate limiting | Abuse prevention (selective) |
 | 8 | Audit Logging | Security trail |
 
 Notes:
 - The **TOTP secret is not exposed** via public endpoints. The user receives it **exactly once** using a one-time *Enrollment code* plus a device-key signature.
 - Rate limiting is applied per **IP** (not `IP:port`). If the server is behind a local reverse proxy (loopback), `X-Forwarded-For` is used to rate-limit per client.
+- The **Kubernetes API proxy** (`/api/v1/k8s/proxy/*`) is **excluded from rate limiting** to support tools like Helm that make many parallel requests. Authentication is still required.
 
 ### Token Revocation
 
@@ -427,7 +428,7 @@ All tests pass, ensuring stability of critical components.
 | `/api/v1/auth/logout` | POST | Logout |
 | `/api/v1/status/cluster` | GET | Cluster status |
 | `/api/v1/k8s/apply` | POST | Apply manifests |
-| `/api/v1/k8s/proxy/*` | ALL | Kubernetes API proxy |
+| `/api/v1/k8s/proxy/*` | ALL | Kubernetes API proxy (no rate limit) |
 | `/api/v1/ssh/exec` | POST | Execute a command |
 | `/api/v1/admin/devices` | GET | List devices |
 | `/api/v1/admin/devices/:id/approve` | POST | Approve device + emit enrollment code (optional `?user=<name>`) |
@@ -456,6 +457,29 @@ zcloud totp ABCD-EFGH-IJKL
 - Check the service: `systemctl status zcloud-server`
 - Check the firewall: `ufw status`
 - Check TLS/health: `curl -k https://api.zyrak.cloud/health`
+
+### Error: "the server has asked for the client to provide credentials" (Helm)
+
+If you see this error when using Helm:
+```
+Error: INSTALLATION FAILED: the server has asked for the client to provide credentials
+```
+
+This can be caused by:
+1. **Expired token**: run `zcloud login` again
+2. **Rate limiting** (older versions): update zcloud-server to the latest version
+3. **Connection issues**: verify the server is accessible
+
+```bash
+# Verify session
+zcloud status
+
+# Re-login if needed
+zcloud login
+
+# Test connection
+kubectl get nodes
+```
 
 ## 📄 License
 

@@ -68,12 +68,11 @@ func (a *API) Router() http.Handler {
 	mux.HandleFunc("POST /api/v1/auth/login", a.handleLogin)
 	mux.HandleFunc("POST /api/v1/totp/enroll", a.handleTOTPEnroll)
 
-	// Rutas protegidas
+	// Rutas protegidas (sin k8s proxy - ese tiene tratamiento especial)
 	protected := http.NewServeMux()
 	protected.HandleFunc("POST /api/v1/auth/logout", a.handleLogout)
 	protected.HandleFunc("GET /api/v1/status/cluster", a.handleClusterStatus)
 	protected.HandleFunc("POST /api/v1/k8s/apply", a.handleApply)
-	protected.HandleFunc("/api/v1/k8s/proxy/", a.handleK8sProxy)
 	protected.HandleFunc("POST /api/v1/ssh/exec", a.handleExec)
 
 	// SSH Shell (WebSocket)
@@ -88,6 +87,10 @@ func (a *API) Router() http.Handler {
 	// Port forwarding (WebSocket)
 	protected.HandleFunc("GET /api/v1/portforward", a.handlePortForward)
 
+	// K8s Proxy - handler separado SIN rate limiting (Helm hace muchas requests paralelas)
+	k8sProxyHandler := http.NewServeMux()
+	k8sProxyHandler.HandleFunc("/api/v1/k8s/proxy/", a.handleK8sProxy)
+
 	// Rutas de admin
 	admin := http.NewServeMux()
 	admin.HandleFunc("GET /api/v1/admin/devices", a.handleListDevices)
@@ -95,22 +98,28 @@ func (a *API) Router() http.Handler {
 	admin.HandleFunc("POST /api/v1/admin/devices/{id}/revoke", a.handleRevokeDevice)
 	admin.HandleFunc("GET /api/v1/admin/sessions", a.handleListSessions)
 
-	// Aplicar middleware
-	mux.Handle("/api/v1/auth/", a.auth.Authenticate(protected))
-	mux.Handle("/api/v1/status/", a.auth.Authenticate(protected))
-	mux.Handle("/api/v1/k8s/", a.auth.Authenticate(protected))
-	mux.Handle("/api/v1/ssh/", a.auth.Authenticate(protected))
-	mux.Handle("/api/v1/files/", a.auth.Authenticate(protected))
-	mux.Handle("/api/v1/portforward", a.auth.Authenticate(protected))
-	mux.Handle("/api/v1/admin/", a.auth.Authenticate(a.auth.RequireAdmin(admin)))
+	// Rate limiter para rutas normales (NO para k8s proxy)
+	rateLimiter := middleware.NewRateLimiter(100, time.Minute)
 
-	// Health check
+	// Aplicar middleware a rutas protegidas CON rate limiting
+	mux.Handle("/api/v1/auth/", rateLimiter.Limit(a.auth.Authenticate(protected)))
+	mux.Handle("/api/v1/status/", rateLimiter.Limit(a.auth.Authenticate(protected)))
+	mux.Handle("/api/v1/ssh/", rateLimiter.Limit(a.auth.Authenticate(protected)))
+	mux.Handle("/api/v1/files/", rateLimiter.Limit(a.auth.Authenticate(protected)))
+	mux.Handle("/api/v1/portforward", rateLimiter.Limit(a.auth.Authenticate(protected)))
+	mux.Handle("/api/v1/admin/", rateLimiter.Limit(a.auth.Authenticate(a.auth.RequireAdmin(admin))))
+
+	// K8s proxy: autenticación SÍ, pero SIN rate limiting
+	// Helm y otras herramientas necesitan hacer muchas requests paralelas
+	mux.Handle("/api/v1/k8s/", a.auth.Authenticate(k8sProxyHandler))
+
+	// Health check (sin rate limiting ni auth)
 	mux.HandleFunc("GET /health", a.handleHealthCheck)
 	mux.HandleFunc("GET /ready", a.handleReadyCheck)
 
-	// Aplicar middleware global
-	rateLimiter := middleware.NewRateLimiter(100, time.Minute)
-	handler := middleware.Logger(middleware.SecurityHeaders(middleware.CORS(rateLimiter.Limit(mux))))
+	// Aplicar middleware global (Logger, Security Headers, CORS)
+	// Nota: el rate limiter ya se aplicó selectivamente arriba
+	handler := middleware.Logger(middleware.SecurityHeaders(middleware.CORS(mux)))
 
 	return handler
 }
