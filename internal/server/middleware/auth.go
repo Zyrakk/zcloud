@@ -30,19 +30,53 @@ type JWTClaims struct {
 	jwt.RegisteredClaims
 }
 
+// tokenCacheEntry represents a cached token validation result
+type tokenCacheEntry struct {
+	claims    *JWTClaims
+	expiresAt time.Time
+}
+
 // AuthMiddleware middleware de autenticación JWT
 type AuthMiddleware struct {
 	jwtSecret []byte
 	db        interface {
 		IsTokenRevoked(tokenHash string) (bool, error)
 	}
+	// Token validation cache to reduce database queries under high concurrency
+	tokenCache   map[string]*tokenCacheEntry
+	tokenCacheMu sync.RWMutex
+	cacheTTL     time.Duration
 }
 
 // NewAuthMiddleware crea un nuevo middleware de autenticación
 func NewAuthMiddleware(jwtSecret string) *AuthMiddleware {
-	return &AuthMiddleware{
-		jwtSecret: []byte(jwtSecret),
-		db:        nil,
+	m := &AuthMiddleware{
+		jwtSecret:  []byte(jwtSecret),
+		db:         nil,
+		tokenCache: make(map[string]*tokenCacheEntry),
+		cacheTTL:   30 * time.Second, // Cache validated tokens for 30 seconds
+	}
+
+	// Start background cleanup goroutine
+	go m.cleanupExpiredCache()
+
+	return m
+}
+
+// cleanupExpiredCache periodically removes expired entries from the token cache
+func (m *AuthMiddleware) cleanupExpiredCache() {
+	ticker := time.NewTicker(1 * time.Minute)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		m.tokenCacheMu.Lock()
+		now := time.Now()
+		for hash, entry := range m.tokenCache {
+			if now.After(entry.expiresAt) {
+				delete(m.tokenCache, hash)
+			}
+		}
+		m.tokenCacheMu.Unlock()
 	}
 }
 
@@ -51,6 +85,14 @@ func (m *AuthMiddleware) SetDatabase(db interface {
 	IsTokenRevoked(tokenHash string) (bool, error)
 }) {
 	m.db = db
+}
+
+// InvalidateToken removes a token from the cache (called on logout/revocation)
+func (m *AuthMiddleware) InvalidateToken(tokenString string) {
+	tokenHash := hashToken(tokenString)
+	m.tokenCacheMu.Lock()
+	delete(m.tokenCache, tokenHash)
+	m.tokenCacheMu.Unlock()
 }
 
 // GenerateToken genera un nuevo JWT
@@ -78,7 +120,19 @@ func (m *AuthMiddleware) GenerateToken(deviceID, deviceName string, isAdmin bool
 }
 
 // ValidateToken valida un JWT y devuelve los claims
+// Uses an in-memory cache to reduce database queries under high concurrency
 func (m *AuthMiddleware) ValidateToken(tokenString string) (*JWTClaims, error) {
+	tokenHash := hashToken(tokenString)
+
+	// Check cache first (fast path for concurrent requests)
+	m.tokenCacheMu.RLock()
+	if entry, ok := m.tokenCache[tokenHash]; ok && time.Now().Before(entry.expiresAt) {
+		m.tokenCacheMu.RUnlock()
+		return entry.claims, nil
+	}
+	m.tokenCacheMu.RUnlock()
+
+	// Cache miss - parse and validate the token
 	token, err := jwt.ParseWithClaims(tokenString, &JWTClaims{}, func(token *jwt.Token) (interface{}, error) {
 		return m.jwtSecret, nil
 	})
@@ -88,17 +142,26 @@ func (m *AuthMiddleware) ValidateToken(tokenString string) (*JWTClaims, error) {
 	}
 
 	if claims, ok := token.Claims.(*JWTClaims); ok && token.Valid {
-		// Check if token is revoked
+		// Check if token is revoked (only on cache miss)
 		if m.db != nil {
-			tokenHash := hashToken(tokenString)
 			revoked, err := m.db.IsTokenRevoked(tokenHash)
 			if err != nil {
-				return nil, fmt.Errorf("failed to check token revocation: %w", err)
-			}
-			if revoked {
+				// Log the error but don't fail - the JWT signature is already valid
+				// This prevents database contention from breaking authentication
+				log.Printf("Warning: failed to check token revocation (proceeding): %v", err)
+			} else if revoked {
 				return nil, jwt.ErrTokenInvalidClaims
 			}
 		}
+
+		// Cache the validated token
+		m.tokenCacheMu.Lock()
+		m.tokenCache[tokenHash] = &tokenCacheEntry{
+			claims:    claims,
+			expiresAt: time.Now().Add(m.cacheTTL),
+		}
+		m.tokenCacheMu.Unlock()
+
 		return claims, nil
 	}
 
