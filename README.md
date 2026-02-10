@@ -483,7 +483,9 @@ kubectl get nodes
 
 ## 📄 License
 
-MIT
+Copyright 2026 Stefan Contreras
+
+Licensed under the Apache License, Version 2.0
 
 ## 🤝 Contributing
 
