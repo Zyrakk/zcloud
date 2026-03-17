@@ -413,3 +413,55 @@ func TestValidateTokenRevoked(t *testing.T) {
 		t.Error("expected error for revoked token, got nil")
 	}
 }
+
+func TestTokenCacheHit(t *testing.T) {
+	am := middleware.NewAuthMiddleware("test-secret")
+	defer am.Close()
+
+	tokenStr, _, err := am.GenerateToken("device-1", "test", false, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	claims1, err := am.ValidateToken(tokenStr)
+	if err != nil {
+		t.Fatalf("first validation failed: %v", err)
+	}
+
+	claims2, err := am.ValidateToken(tokenStr)
+	if err != nil {
+		t.Fatalf("second validation failed: %v", err)
+	}
+
+	if claims1.DeviceID != claims2.DeviceID {
+		t.Error("cached claims do not match")
+	}
+}
+
+func TestInvalidateToken(t *testing.T) {
+	am := middleware.NewAuthMiddleware("test-secret")
+	defer am.Close()
+
+	tokenStr, _, err := am.GenerateToken("device-1", "test", false, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Populate cache
+	_, err = am.ValidateToken(tokenStr)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Invalidate
+	am.InvalidateToken(tokenStr)
+
+	// Set DB to return revoked
+	am.SetDatabase(&mockDBRevoked{})
+
+	// Should now fail (cache was evicted, DB says revoked)
+	_, err = am.ValidateToken(tokenStr)
+	if err == nil {
+		t.Error("expected error after invalidation + DB revocation")
+	}
+}

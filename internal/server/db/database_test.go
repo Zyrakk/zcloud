@@ -518,3 +518,173 @@ func TestListDevicesRowsErr(t *testing.T) {
 		t.Errorf("expected 1 device, got %d", len(devices))
 	}
 }
+
+func TestCreateAndGetUser(t *testing.T) {
+	database := setupTestDB(t)
+
+	err := database.CreateUser("user-1", "alice", "totp-secret-123")
+	if err != nil {
+		t.Fatalf("CreateUser failed: %v", err)
+	}
+
+	user, err := database.GetUser("user-1")
+	if err != nil {
+		t.Fatalf("GetUser failed: %v", err)
+	}
+	if user.Name != "alice" {
+		t.Errorf("expected name alice, got %s", user.Name)
+	}
+}
+
+func TestGetUserByName(t *testing.T) {
+	database := setupTestDB(t)
+
+	if err := database.CreateUser("user-2", "bob", "secret"); err != nil {
+		t.Fatal(err)
+	}
+
+	user, err := database.GetUserByName("bob")
+	if err != nil {
+		t.Fatalf("GetUserByName failed: %v", err)
+	}
+	if user.ID != "user-2" {
+		t.Errorf("expected ID user-2, got %s", user.ID)
+	}
+
+	user, err = database.GetUserByName("nonexistent")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if user != nil {
+		t.Error("expected nil for nonexistent user")
+	}
+}
+
+func TestMarkUserTOTPConfigured(t *testing.T) {
+	database := setupTestDB(t)
+
+	if err := database.CreateUser("user-totp", "charlie", "secret"); err != nil {
+		t.Fatal(err)
+	}
+
+	changed, err := database.MarkUserTOTPConfigured("user-totp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !changed {
+		t.Error("expected first MarkUserTOTPConfigured to return true")
+	}
+
+	changed, err = database.MarkUserTOTPConfigured("user-totp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if changed {
+		t.Error("expected second MarkUserTOTPConfigured to return false")
+	}
+}
+
+func TestConsumeTOTPEnrollment(t *testing.T) {
+	database := setupTestDB(t)
+
+	if err := database.CreateUser("enroll-user", "dave", "totp-secret"); err != nil {
+		t.Fatal(err)
+	}
+	device := &protocol.DeviceInfo{
+		ID: "enroll-device", Name: "test", PublicKey: "pk-enroll",
+		Hostname: "host", OS: "linux", Status: protocol.DeviceStatusApproved,
+		CreatedAt: time.Now(),
+	}
+	if err := database.CreateDevice(device, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.SetDeviceUserID("enroll-device", "enroll-user"); err != nil {
+		t.Fatal(err)
+	}
+
+	codeHash := "test-code-hash"
+	expires := time.Now().Add(10 * time.Minute)
+	if err := database.CreateTOTPEnrollment(codeHash, "enroll-device", "enroll-user", expires); err != nil {
+		t.Fatal(err)
+	}
+
+	// ConsumeTOTPEnrollment returns userID (not TOTP secret)
+	userID, err := database.ConsumeTOTPEnrollment(codeHash, "enroll-device")
+	if err != nil {
+		t.Fatalf("ConsumeTOTPEnrollment failed: %v", err)
+	}
+	if userID != "enroll-user" {
+		t.Errorf("expected userID enroll-user, got %s", userID)
+	}
+
+	// Second consumption should fail (one-time use)
+	_, err = database.ConsumeTOTPEnrollment(codeHash, "enroll-device")
+	if err == nil {
+		t.Error("expected error on second consumption (one-time use)")
+	}
+}
+
+func TestConsumeTOTPEnrollmentExpired(t *testing.T) {
+	database := setupTestDB(t)
+
+	if err := database.CreateUser("exp-user", "eve", "secret"); err != nil {
+		t.Fatal(err)
+	}
+	device := &protocol.DeviceInfo{
+		ID: "exp-device", Name: "test", PublicKey: "pk-exp",
+		Hostname: "host", OS: "linux", Status: protocol.DeviceStatusApproved,
+		CreatedAt: time.Now(),
+	}
+	if err := database.CreateDevice(device, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.SetDeviceUserID("exp-device", "exp-user"); err != nil {
+		t.Fatal(err)
+	}
+
+	codeHash := "expired-code-hash"
+	expires := time.Now().Add(-1 * time.Minute)
+	if err := database.CreateTOTPEnrollment(codeHash, "exp-device", "exp-user", expires); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := database.ConsumeTOTPEnrollment(codeHash, "exp-device")
+	if err == nil {
+		t.Error("expected error for expired enrollment code")
+	}
+}
+
+func TestGetDeviceNonExistent(t *testing.T) {
+	database := setupTestDB(t)
+
+	device, err := database.GetDevice("nonexistent")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if device != nil {
+		t.Error("expected nil for nonexistent device")
+	}
+}
+
+func TestCreateDeviceDuplicateID(t *testing.T) {
+	database := setupTestDB(t)
+
+	device := &protocol.DeviceInfo{
+		ID: "dup-id", Name: "test1", PublicKey: "pk-1",
+		Hostname: "host", OS: "linux", Status: protocol.DeviceStatusPending,
+		CreatedAt: time.Now(),
+	}
+	if err := database.CreateDevice(device, "secret"); err != nil {
+		t.Fatal(err)
+	}
+
+	device2 := &protocol.DeviceInfo{
+		ID: "dup-id", Name: "test2", PublicKey: "pk-2",
+		Hostname: "host", OS: "linux", Status: protocol.DeviceStatusPending,
+		CreatedAt: time.Now(),
+	}
+	err := database.CreateDevice(device2, "secret")
+	if err == nil {
+		t.Error("expected error for duplicate device ID")
+	}
+}

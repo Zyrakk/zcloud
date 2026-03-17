@@ -268,3 +268,32 @@ func TestRateLimiterVerySmallWindow(t *testing.T) {
 		t.Errorf("Request after small window: Expected status 200, got %d", w.Code)
 	}
 }
+
+func TestClientIP(t *testing.T) {
+	tests := []struct {
+		name       string
+		remoteAddr string
+		xff        string
+		expected   string
+	}{
+		{"direct client", "192.168.1.1:12345", "", "192.168.1.1"},
+		{"loopback with XFF", "127.0.0.1:12345", "203.0.113.50", "203.0.113.50"},
+		{"loopback without XFF", "127.0.0.1:12345", "", "127.0.0.1"},
+		{"non-loopback ignores XFF", "192.168.1.1:12345", "10.0.0.1", "192.168.1.1"},
+		{"XFF with multiple entries", "127.0.0.1:12345", "203.0.113.50, 70.41.3.18", "203.0.113.50"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := httptest.NewRequest("GET", "/", nil)
+			r.RemoteAddr = tt.remoteAddr
+			if tt.xff != "" {
+				r.Header.Set("X-Forwarded-For", tt.xff)
+			}
+			got := clientIP(r)
+			if got != tt.expected {
+				t.Errorf("clientIP() = %q, want %q", got, tt.expected)
+			}
+		})
+	}
+}
