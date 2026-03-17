@@ -157,14 +157,17 @@ func TestGetTOTPURL(t *testing.T) {
 		AccountName: "testuser",
 	}
 
-	url := GetTOTPURL("JBSWY3DPEHPK3PXP", config)
-	if url == "" {
+	u, err := GetTOTPURL("JBSWY3DPEHPK3PXP", config)
+	if err != nil {
+		t.Fatalf("GetTOTPURL failed: %v", err)
+	}
+	if u == "" {
 		t.Error("TOTP URL is empty")
 	}
 
 	expectedPrefix := "otpauth://totp/TestIssuer:testuser?secret=JBSWY3DPEHPK3PXP"
-	if len(url) < len(expectedPrefix) {
-		t.Errorf("TOTP URL too short: %s", url)
+	if len(u) < len(expectedPrefix) {
+		t.Errorf("TOTP URL too short: %s", u)
 	}
 }
 
@@ -186,26 +189,22 @@ func TestGenerateTOTPQRFromSecret(t *testing.T) {
 }
 
 func TestGenerateDeviceID(t *testing.T) {
-	publicKey := "test-public-key-123456"
-
-	deviceID := GenerateDeviceID(publicKey)
-	if deviceID == "" {
-		t.Error("Device ID is empty")
+	kp, err := GenerateKeyPair()
+	if err != nil {
+		t.Fatal(err)
 	}
-
-	if len(deviceID) != 12 {
-		t.Errorf("Expected device ID length 12, got %d", len(deviceID))
+	id := GenerateDeviceID(kp.PublicKeyString())
+	if len(id) != 12 {
+		t.Errorf("expected 12-character ID, got %d: %s", len(id), id)
 	}
-
-	deviceID2 := GenerateDeviceID(publicKey)
-	if deviceID != deviceID2 {
-		t.Error("Device ID should be consistent for same public key")
+	id2 := GenerateDeviceID(kp.PublicKeyString())
+	if id != id2 {
+		t.Error("GenerateDeviceID is not deterministic")
 	}
-
-	publicKey2 := "different-public-key-789"
-	deviceID3 := GenerateDeviceID(publicKey2)
-	if deviceID3 == deviceID {
-		t.Error("Device IDs should be different for different public keys")
+	for _, c := range id {
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) {
+			t.Errorf("unexpected character in device ID: %c", c)
+		}
 	}
 }
 
@@ -273,5 +272,53 @@ func TestLoadFromKeyStringsInvalid(t *testing.T) {
 	_, err = LoadFromKeyStrings("", "")
 	if err == nil {
 		t.Error("Expected error for empty strings")
+	}
+}
+
+func TestLoadFromKeyStringsMismatch(t *testing.T) {
+	kp1, err := GenerateKeyPair()
+	if err != nil {
+		t.Fatal(err)
+	}
+	kp2, err := GenerateKeyPair()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Signature: LoadFromKeyStrings(publicKeyB64, privateKeyB64 string)
+	_, err = LoadFromKeyStrings(kp2.PublicKeyString(), kp1.PrivateKeyString())
+	if err == nil {
+		t.Error("expected error for mismatched key pair, got nil")
+	}
+}
+
+func TestGenerateRandomSecretEdgeCases(t *testing.T) {
+	_, err := GenerateRandomSecret(0)
+	if err == nil {
+		t.Error("expected error for length 0")
+	}
+	_, err = GenerateRandomSecret(-1)
+	if err == nil {
+		t.Error("expected error for negative length")
+	}
+}
+
+func TestSaveAndLoadFromFiles(t *testing.T) {
+	dir := t.TempDir()
+	kp, err := GenerateKeyPair()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := kp.SaveToFiles(dir); err != nil {
+		t.Fatalf("SaveToFiles failed: %v", err)
+	}
+	loaded, err := LoadFromFiles(dir)
+	if err != nil {
+		t.Fatalf("LoadFromFiles failed: %v", err)
+	}
+	if kp.PublicKeyString() != loaded.PublicKeyString() {
+		t.Error("public keys do not match after round-trip")
+	}
+	if kp.PrivateKeyString() != loaded.PrivateKeyString() {
+		t.Error("private keys do not match after round-trip")
 	}
 }

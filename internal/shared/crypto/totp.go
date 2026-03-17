@@ -3,6 +3,7 @@ package crypto
 import (
 	"encoding/base64"
 	"fmt"
+	"net/url"
 
 	"github.com/pquerna/otp"
 	"github.com/pquerna/otp/totp"
@@ -43,18 +44,18 @@ func ValidateTOTP(secret, code string) bool {
 }
 
 // GetTOTPURL genera la URL para el QR code
-func GetTOTPURL(secret string, config TOTPConfig) string {
+func GetTOTPURL(secret string, config TOTPConfig) (string, error) {
 	key, err := otp.NewKeyFromURL(fmt.Sprintf(
 		"otpauth://totp/%s:%s?secret=%s&issuer=%s&algorithm=SHA1&digits=6&period=30",
-		config.Issuer,
-		config.AccountName,
+		url.PathEscape(config.Issuer),
+		url.PathEscape(config.AccountName),
 		secret,
-		config.Issuer,
+		url.QueryEscape(config.Issuer),
 	))
 	if err != nil {
-		return ""
+		return "", fmt.Errorf("failed to create TOTP key from URL: %w", err)
 	}
-	return key.URL()
+	return key.URL(), nil
 }
 
 // GenerateTOTPQRFromSecret genera un QR code base64 para un secreto TOTP existente

@@ -913,10 +913,14 @@ func (a *API) handleTOTPEnroll(w http.ResponseWriter, r *http.Request) {
 		Issuer:      a.config.TOTPIssuer,
 		AccountName: accountName,
 	})
-	totpURL := crypto.GetTOTPURL(secret, crypto.TOTPConfig{
+	totpURL, err := crypto.GetTOTPURL(secret, crypto.TOTPConfig{
 		Issuer:      a.config.TOTPIssuer,
 		AccountName: accountName,
 	})
+	if err != nil {
+		a.jsonError(w, "failed to generate TOTP URL", http.StatusInternalServerError)
+		return
+	}
 
 	// Mark configured before returning the secret to enforce "only once" even under concurrent enrollments.
 	marked, err := a.db.MarkUserTOTPConfigured(userID)

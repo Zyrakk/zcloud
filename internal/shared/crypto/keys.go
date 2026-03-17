@@ -1,9 +1,12 @@
 package crypto
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -103,7 +106,7 @@ func LoadFromKeyStrings(publicKeyB64, privateKeyB64 string) (*KeyPair, error) {
 		return nil, fmt.Errorf("invalid private key size")
 	}
 
-	priv := ed25519.PrivateKey(privBytes)
+	privKey := ed25519.PrivateKey(privBytes)
 
 	pubBytes, err := base64.StdEncoding.DecodeString(publicKeyB64)
 	if err != nil {
@@ -114,9 +117,15 @@ func LoadFromKeyStrings(publicKeyB64, privateKeyB64 string) (*KeyPair, error) {
 		return nil, fmt.Errorf("invalid public key size")
 	}
 
+	pubKey := ed25519.PublicKey(pubBytes)
+	derivedPub := privKey.Public().(ed25519.PublicKey)
+	if !bytes.Equal(derivedPub, pubKey) {
+		return nil, fmt.Errorf("public key does not match private key")
+	}
+
 	return &KeyPair{
-		PrivateKey: priv,
-		PublicKey:  pubBytes,
+		PrivateKey: privKey,
+		PublicKey:  pubKey,
 	}, nil
 }
 
@@ -142,19 +151,18 @@ func VerifySignature(publicKeyB64, message, signatureB64 string) (bool, error) {
 
 // GenerateDeviceID genera un ID único para el dispositivo basado en la clave pública
 func GenerateDeviceID(publicKey string) string {
-	// Usar los primeros 8 caracteres del hash de la clave pública
-	hash := base64.StdEncoding.EncodeToString([]byte(publicKey))
-	if len(hash) > 12 {
-		return hash[:12]
-	}
-	return hash
+	hash := sha256.Sum256([]byte(publicKey))
+	return hex.EncodeToString(hash[:])[:12]
 }
 
 // GenerateRandomSecret genera un secreto aleatorio para JWT
 func GenerateRandomSecret(length int) (string, error) {
-	bytes := make([]byte, length)
-	if _, err := rand.Read(bytes); err != nil {
-		return "", err
+	if length <= 0 {
+		return "", fmt.Errorf("secret length must be positive, got %d", length)
 	}
-	return base64.StdEncoding.EncodeToString(bytes), nil
+	b := make([]byte, length)
+	if _, err := rand.Read(b); err != nil {
+		return "", fmt.Errorf("failed to generate random bytes: %w", err)
+	}
+	return base64.StdEncoding.EncodeToString(b), nil
 }
