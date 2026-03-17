@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"strings"
@@ -22,8 +23,21 @@ type Client struct {
 	baseURL    string
 }
 
+// getTLSConfig safely extracts the TLS configuration from an http.RoundTripper.
+// Returns nil if the transport is nil or not an *http.Transport.
+func getTLSConfig(rt http.RoundTripper) *tls.Config {
+	if t, ok := rt.(*http.Transport); ok && t != nil {
+		return t.TLSClientConfig
+	}
+	return nil
+}
+
 // NewClient crea un nuevo cliente
 func NewClient(config *Config) *Client {
+	if config.Server.Insecure {
+		log.Println("WARNING: TLS certificate verification is disabled (insecure mode)")
+	}
+
 	transport := &http.Transport{
 		TLSClientConfig: &tls.Config{
 			InsecureSkipVerify: config.Server.Insecure,
@@ -93,7 +107,11 @@ func (c *Client) doRequest(method, path string, body interface{}, result interfa
 	if resp.StatusCode >= 400 {
 		var errResp protocol.ErrorResponse
 		if err := json.Unmarshal(respBody, &errResp); err == nil && errResp.Error != "" {
-			return fmt.Errorf("%s: %s", errResp.Error, errResp.Details)
+			msg := errResp.Error
+			if errResp.Details != "" {
+				msg += ": " + errResp.Details
+			}
+			return fmt.Errorf("server error: %s", msg)
 		}
 		return fmt.Errorf("server error: %s (status %d)", string(respBody), resp.StatusCode)
 	}

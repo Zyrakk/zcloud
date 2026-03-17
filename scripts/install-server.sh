@@ -17,15 +17,24 @@ BLUE='\033[0;34m'
 CYAN='\033[0;36m'
 NC='\033[0m'
 
-INSTALL_DIR="/opt/zcloud-server"
-BINARY_URL="https://github.com/zyrak/zcloud/releases/latest/download/zcloud-server-linux-amd64"
-# Para desarrollo local, usar ruta local si existe
-LOCAL_BINARY="./dist/zcloud-server-linux-amd64"
-
 log_info()  { echo -e "${BLUE}[INFO]${NC} $1"; }
 log_ok()    { echo -e "${GREEN}[OK]${NC} $1"; }
 log_warn()  { echo -e "${YELLOW}[WARN]${NC} $1"; }
 log_error() { echo -e "${RED}[ERROR]${NC} $1"; exit 1; }
+
+INSTALL_DIR="/opt/zcloud-server"
+
+# Detect architecture
+ARCH=$(uname -m)
+case "$ARCH" in
+    x86_64)  ARCH_SUFFIX="amd64" ;;
+    aarch64) ARCH_SUFFIX="arm64" ;;
+    *)       log_error "Unsupported architecture: $ARCH" ;;
+esac
+
+BINARY_URL="https://github.com/zyrak/zcloud/releases/latest/download/zcloud-server-linux-${ARCH_SUFFIX}"
+# For local development, use local binary if it exists
+LOCAL_BINARY="./dist/zcloud-server-linux-${ARCH_SUFFIX}"
 
 check_root() {
     if [[ $EUID -ne 0 ]]; then
@@ -53,10 +62,10 @@ check_dependencies() {
 create_directories() {
     log_info "Creating directories..."
     
-    mkdir -p ${INSTALL_DIR}/{data,certs}
-    chmod 750 ${INSTALL_DIR}
-    chmod 700 ${INSTALL_DIR}/data
-    chmod 750 ${INSTALL_DIR}/certs
+    mkdir -p "${INSTALL_DIR}"/{data,certs}
+    chmod 750 "${INSTALL_DIR}"
+    chmod 700 "${INSTALL_DIR}"/data
+    chmod 750 "${INSTALL_DIR}"/certs
     
     log_ok "Directories created"
 }
@@ -66,24 +75,24 @@ install_binary() {
     
     if [[ -f "$LOCAL_BINARY" ]]; then
         # Usar binario local (desarrollo)
-        cp "$LOCAL_BINARY" ${INSTALL_DIR}/zcloud-server
+        cp "$LOCAL_BINARY" "${INSTALL_DIR}"/zcloud-server
         log_info "Using local binary"
     else
         # Descargar binario
         log_info "Downloading from ${BINARY_URL}..."
-        if ! curl -fsSL -o ${INSTALL_DIR}/zcloud-server "$BINARY_URL"; then
+        if ! curl -fsSL -o "${INSTALL_DIR}"/zcloud-server "$BINARY_URL"; then
             log_error "Failed to download binary"
         fi
     fi
     
-    chmod +x ${INSTALL_DIR}/zcloud-server
+    chmod +x "${INSTALL_DIR}"/zcloud-server
     log_ok "Binary installed"
 }
 
 create_config() {
     log_info "Creating configuration..."
     
-    if [[ -f ${INSTALL_DIR}/config.yaml ]]; then
+    if [[ -f "${INSTALL_DIR}"/config.yaml ]]; then
         log_warn "config.yaml already exists, not overwriting"
         return
     fi
@@ -92,7 +101,7 @@ create_config() {
     read -p "API domain (e.g. api.zyrak.cloud): " DOMAIN
     DOMAIN=${DOMAIN:-api.zyrak.cloud}
     
-    cat > ${INSTALL_DIR}/config.yaml << EOF
+    cat > "${INSTALL_DIR}"/config.yaml << EOF
 # ZCloud Server Configuration
 # Generado: $(date)
 
@@ -119,14 +128,14 @@ storage:
   database: ${INSTALL_DIR}/data/zcloud.db
 EOF
 
-    chmod 600 ${INSTALL_DIR}/config.yaml
+    chmod 600 "${INSTALL_DIR}"/config.yaml
     log_ok "Configuration created"
 }
 
 init_server() {
     log_info "Initializing server..."
     
-    ${INSTALL_DIR}/zcloud-server --init --config ${INSTALL_DIR}/config.yaml
+    "${INSTALL_DIR}"/zcloud-server --init --config "${INSTALL_DIR}"/config.yaml
     
     log_ok "Server initialized"
 }
@@ -180,7 +189,7 @@ setup_tls() {
     log_info "Configuring TLS..."
     
     # Leer dominio de config
-    DOMAIN=$(grep "domain:" ${INSTALL_DIR}/config.yaml | awk '{print $2}')
+    DOMAIN=$(grep "domain:" "${INSTALL_DIR}"/config.yaml | awk '{print $2}')
     
     if command -v certbot &>/dev/null; then
         echo ""
@@ -190,8 +199,8 @@ setup_tls() {
         echo ""
         echo "Then create symlinks:"
         echo ""
-        echo "  sudo ln -sf /etc/letsencrypt/live/${DOMAIN}/fullchain.pem ${INSTALL_DIR}/certs/"
-        echo "  sudo ln -sf /etc/letsencrypt/live/${DOMAIN}/privkey.pem ${INSTALL_DIR}/certs/"
+        echo "  sudo ln -sf /etc/letsencrypt/live/${DOMAIN}/fullchain.pem \"${INSTALL_DIR}\"/certs/"
+        echo "  sudo ln -sf /etc/letsencrypt/live/${DOMAIN}/privkey.pem \"${INSTALL_DIR}\"/certs/"
         echo ""
     else
         echo ""
@@ -210,7 +219,7 @@ create_first_admin() {
     echo "The first device you register should be made admin."
     echo "To register your device, install the zcloud client and run:"
     echo ""
-    echo "  zcloud init https://\$(tu-dominio)"
+    echo "  zcloud init https://${DOMAIN}"
     echo ""
 }
 
@@ -234,9 +243,9 @@ final_report() {
     echo "   Point your domain to this server's public IP"
     echo ""
     echo "2. Obtain TLS certificates:"
-    echo "   sudo certbot certonly --standalone -d api.zyrak.cloud"
-    echo "   sudo ln -sf /etc/letsencrypt/live/api.zyrak.cloud/fullchain.pem ${INSTALL_DIR}/certs/"
-    echo "   sudo ln -sf /etc/letsencrypt/live/api.zyrak.cloud/privkey.pem ${INSTALL_DIR}/certs/"
+    echo "   sudo certbot certonly --standalone -d ${DOMAIN}"
+    echo "   sudo ln -sf /etc/letsencrypt/live/${DOMAIN}/fullchain.pem \"${INSTALL_DIR}\"/certs/"
+    echo "   sudo ln -sf /etc/letsencrypt/live/${DOMAIN}/privkey.pem \"${INSTALL_DIR}\"/certs/"
     echo ""
     echo "3. Start the server:"
     echo "   sudo systemctl enable --now zcloud-server"

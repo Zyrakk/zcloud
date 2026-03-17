@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"runtime"
-	"strconv"
 	"strings"
 	"time"
 
@@ -447,21 +446,3 @@ func readTOTP() string {
 	return strings.TrimSpace(input)
 }
 
-// ParseDuration parsea una duración como "12h" o "30m"
-func ParseDuration(s string) (time.Duration, error) {
-	if strings.HasSuffix(s, "h") {
-		hours, err := strconv.Atoi(strings.TrimSuffix(s, "h"))
-		if err != nil {
-			return 0, err
-		}
-		return time.Duration(hours) * time.Hour, nil
-	}
-	if strings.HasSuffix(s, "m") {
-		mins, err := strconv.Atoi(strings.TrimSuffix(s, "m"))
-		if err != nil {
-			return 0, err
-		}
-		return time.Duration(mins) * time.Minute, nil
-	}
-	return time.ParseDuration(s)
-}

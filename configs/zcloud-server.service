@@ -25,5 +25,13 @@ PrivateTmp=true
 # Environment
 Environment=ZCLOUD_ENV=production
 
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+MemoryDenyWriteExecute=true
+LimitNOFILE=65536
+
 [Install]
 WantedBy=multi-user.target

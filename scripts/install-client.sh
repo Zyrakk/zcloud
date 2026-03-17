@@ -29,13 +29,12 @@ detect_arch() {
     esac
 }
 
-# Detectar OS
+# Detect OS
 detect_os() {
-    local os=$(uname -s | tr '[:upper:]' '[:lower:]')
-    case $os in
-        linux)  echo "linux" ;;
-        darwin) echo "darwin" ;;
-        *)      echo "unsupported" ;;
+    local os=$(uname -s)
+    case "$os" in
+        Linux)   echo "linux" ;;
+        *)       echo "Error: Unsupported OS: $os. Only Linux is currently supported." >&2; exit 1 ;;
     esac
 }
 
@@ -47,8 +46,8 @@ main() {
     OS=$(detect_os)
     ARCH=$(detect_arch)
     
-    if [[ "$OS" == "unsupported" ]] || [[ "$ARCH" == "unsupported" ]]; then
-        echo "❌ Unsupported system: $(uname -s) $(uname -m)"
+    if [[ "$ARCH" == "unsupported" ]]; then
+        echo "Error: Unsupported architecture: $(uname -m)"
         exit 1
     fi
     
@@ -61,7 +60,7 @@ main() {
     
     # Crear directorio temporal
     TMP_DIR=$(mktemp -d)
-    trap "rm -rf $TMP_DIR" EXIT
+    trap 'rm -rf "$TMP_DIR"' EXIT
     
     # Descargar
     echo -e "${BLUE}📥 Downloading ${BINARY}...${NC}"

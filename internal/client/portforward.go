@@ -80,11 +80,14 @@ func (p *PortForwardClient) handleConnection(conn net.Conn, targetHost string, t
 
 	// Dialer con TLS config
 	dialer := websocket.Dialer{
-		TLSClientConfig: p.client.httpClient.Transport.(*http.Transport).TLSClientConfig,
+		TLSClientConfig: getTLSConfig(p.client.httpClient.Transport),
 	}
 
 	// Conectar
 	wsConn, resp, err := dialer.Dial(wsURL, headers)
+	if resp != nil && resp.Body != nil {
+		defer resp.Body.Close()
+	}
 	if err != nil {
 		if resp != nil && resp.StatusCode == http.StatusUnauthorized {
 			log.Printf("Authentication failed: please login first")
@@ -138,32 +141,27 @@ func (p *PortForwardClient) handleConnection(conn net.Conn, targetHost string, t
 		defer wg.Done()
 
 		for {
-			select {
-			case <-done:
+			var msg protocol.PortForwardMessage
+			if err := wsConn.ReadJSON(&msg); err != nil {
+				// Suppress expected close errors (normal HTTP connection end, browser tab close, etc.)
+				if !websocket.IsCloseError(err, websocket.CloseGoingAway, websocket.CloseNormalClosure, websocket.CloseAbnormalClosure) &&
+					!websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseNormalClosure, websocket.CloseAbnormalClosure) {
+					log.Printf("WebSocket read error: %v", err)
+				}
 				return
-			default:
-				var msg protocol.PortForwardMessage
-				if err := wsConn.ReadJSON(&msg); err != nil {
-					// Suppress expected close errors (normal HTTP connection end, browser tab close, etc.)
-					if !websocket.IsCloseError(err, websocket.CloseGoingAway, websocket.CloseNormalClosure, websocket.CloseAbnormalClosure) &&
-						!websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseNormalClosure, websocket.CloseAbnormalClosure) {
-						log.Printf("WebSocket read error: %v", err)
-					}
-					return
-				}
+			}
 
-				switch msg.Type {
-				case protocol.PortForwardData:
-					if _, err := conn.Write(msg.Data); err != nil {
-						log.Printf("TCP write error: %v", err)
-						return
-					}
-				case protocol.PortForwardError:
-					log.Printf("Remote error: %s", string(msg.Data))
-					return
-				case protocol.PortForwardClose:
+			switch msg.Type {
+			case protocol.PortForwardData:
+				if _, err := conn.Write(msg.Data); err != nil {
+					log.Printf("TCP write error: %v", err)
 					return
 				}
+			case protocol.PortForwardError:
+				log.Printf("Remote error: %s", string(msg.Data))
+				return
+			case protocol.PortForwardClose:
+				return
 			}
 		}
 	}()

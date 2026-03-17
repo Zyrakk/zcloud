@@ -1,6 +1,9 @@
-.PHONY: all build build-client build-server clean install-client install-server test
+.PHONY: all build build-client build-server clean install-client install-server test deps dev-server dev-client
 
 VERSION ?= $(shell if [ -f VERSION ]; then cat VERSION; else git describe --tags --abbrev=0 2>/dev/null || echo dev; fi)
+
+UNAME_M := $(shell uname -m)
+INSTALL_ARCH := $(if $(filter x86_64,$(UNAME_M)),amd64,$(if $(filter aarch64,$(UNAME_M)),arm64,amd64))
 BUILD_TIME := $(shell date -u '+%Y-%m-%d_%H:%M:%S')
 LDFLAGS := -ldflags "-X main.Version=$(VERSION) -X main.BuildTime=$(BUILD_TIME)"
 
@@ -27,14 +30,14 @@ clean:
 
 install-client: build-client
 	@echo "Installing zcloud client..."
-	sudo cp dist/zcloud-linux-amd64 /usr/local/bin/zcloud
+	sudo cp dist/zcloud-linux-$(INSTALL_ARCH) /usr/local/bin/zcloud
 	sudo chmod +x /usr/local/bin/zcloud
 	@echo "Installed: /usr/local/bin/zcloud"
 
 install-server: build-server
 	@echo "Installing zcloud-server..."
 	sudo mkdir -p /opt/zcloud-server
-	sudo cp dist/zcloud-server-linux-amd64 /opt/zcloud-server/zcloud-server
+	sudo cp dist/zcloud-server-linux-$(INSTALL_ARCH) /opt/zcloud-server/zcloud-server
 	sudo chmod +x /opt/zcloud-server/zcloud-server
 	sudo cp configs/zcloud-server.service /etc/systemd/system/
 	sudo systemctl daemon-reload

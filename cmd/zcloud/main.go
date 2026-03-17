@@ -127,13 +127,17 @@ Example:
 					}
 				}
 
+				cleanDir := filepath.Clean(dir)
 				home, _ := os.UserHomeDir()
-				if home != "" {
-					cleanDir := filepath.Clean(dir)
-					if cleanDir == home || cleanDir == filepath.Clean(home)+string(os.PathSeparator) {
-						fmt.Fprintln(os.Stderr, "Error: refusing to delete home directory")
-						os.Exit(1)
-					}
+
+				resolvedDir, err := filepath.EvalSymlinks(cleanDir)
+				if err == nil {
+					cleanDir = resolvedDir
+				}
+
+				if cleanDir == "/" || cleanDir == home || strings.HasPrefix(home, cleanDir+"/") {
+					fmt.Fprintf(os.Stderr, "Error: refusing to delete %s (too broad)\n", cleanDir)
+					os.Exit(1)
 				}
 
 				if err := os.RemoveAll(dir); err != nil {
@@ -214,7 +218,7 @@ Example:
 			}
 
 			// If there's already a valid session, keep it unless --force.
-			if cfg.IsSessionValid() && !force {
+			if cfg.HasValidSession() && !force {
 				expires := cfg.SessionExpiresIn()
 				fmt.Printf("✅ You already have an active session\n")
 				fmt.Printf("   ☸ Cluster: %s\n", getClusterName(cfg))
@@ -235,7 +239,7 @@ Example:
 			}
 
 			// If --force and we already had a valid session, revoke it (best-effort) to avoid leaving stale tokens around.
-			if force && cfg.IsSessionValid() {
+			if force && cfg.HasValidSession() {
 				_ = auth.GetClient().Logout()
 				cfg.ClearSession()
 				_ = cfg.Save()
@@ -353,7 +357,7 @@ func statusCmd() *cobra.Command {
 		Run: func(cmd *cobra.Command, args []string) {
 			if checkOnly {
 				// Quiet mode - only exit code
-				if cfg.IsSessionValid() {
+				if cfg.HasValidSession() {
 					os.Exit(0)
 				} else {
 					os.Exit(1)

@@ -2,6 +2,7 @@ package client
 
 import (
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 
@@ -58,6 +59,10 @@ type UserEntry struct {
 
 // GenerateKubeconfig genera el archivo kubeconfig con el token actual
 func (c *Config) GenerateKubeconfig(token string) error {
+	if c.Server.Insecure {
+		log.Println("WARNING: TLS certificate verification is disabled (insecure mode)")
+	}
+
 	// Usar valores por defecto si no están configurados
 	clusterName := c.Cluster.Name
 	if clusterName == "" {
@@ -124,9 +129,13 @@ func (c *Config) GenerateKubeconfig(token string) error {
 	return nil
 }
 
-// ClearKubeconfig limpia el token del kubeconfig
+// ClearKubeconfig removes the kubeconfig file.
 func (c *Config) ClearKubeconfig() error {
-	return c.GenerateKubeconfig("")
+	path := c.KubeconfigPath()
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("failed to remove kubeconfig: %w", err)
+	}
+	return nil
 }
 
 // KubeconfigPath devuelve la ruta al kubeconfig

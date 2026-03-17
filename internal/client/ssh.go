@@ -49,11 +49,14 @@ func (s *SSHClient) Connect() error {
 
 	// Dialer con TLS config
 	dialer := websocket.Dialer{
-		TLSClientConfig: s.client.httpClient.Transport.(*http.Transport).TLSClientConfig,
+		TLSClientConfig: getTLSConfig(s.client.httpClient.Transport),
 	}
 
 	// Conectar
 	conn, resp, err := dialer.Dial(wsURL, headers)
+	if resp != nil && resp.Body != nil {
+		defer resp.Body.Close()
+	}
 	if err != nil {
 		if resp != nil && resp.StatusCode == http.StatusUnauthorized {
 			return fmt.Errorf("authentication failed: please login first")
@@ -201,9 +204,6 @@ func (s *SSHClient) getTermSize() (int, int) {
 	}
 	return width, height
 }
-
-// sendTermSize envía el tamaño actual del terminal
-// sendTermSize removed: writes are serialized via writeCh in Connect().
 
 // getWSURL genera la URL WebSocket a partir de la URL HTTP
 func (s *SSHClient) getWSURL() (string, error) {

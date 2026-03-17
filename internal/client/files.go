@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"mime/multipart"
 	"net/http"
 	"net/url"
@@ -28,6 +29,10 @@ type FilesClient struct {
 
 // NewFilesClient crea un nuevo cliente de archivos
 func NewFilesClient(cfg *Config) *FilesClient {
+	if cfg.Server.Insecure {
+		log.Println("WARNING: TLS certificate verification is disabled (insecure mode)")
+	}
+
 	transport := &http.Transport{
 		TLSClientConfig: &tls.Config{
 			InsecureSkipVerify: cfg.Server.Insecure,
@@ -108,7 +113,7 @@ func (f *FilesClient) Upload(localPath, remotePath string) (*protocol.FileUpload
 		body, _ := io.ReadAll(resp.Body)
 		var errResp protocol.ErrorResponse
 		if err := json.Unmarshal(body, &errResp); err == nil && errResp.Error != "" {
-			return nil, fmt.Errorf("%s", errResp.Error)
+			return nil, fmt.Errorf("server error: %s", errResp.Error)
 		}
 		return nil, fmt.Errorf("upload failed: %s", string(body))
 	}
@@ -177,7 +182,7 @@ func (f *FilesClient) Download(remotePath, localPath string) error {
 		body, _ := io.ReadAll(resp.Body)
 		var errResp protocol.ErrorResponse
 		if err := json.Unmarshal(body, &errResp); err == nil && errResp.Error != "" {
-			return fmt.Errorf("%s", errResp.Error)
+			return fmt.Errorf("server error: %s", errResp.Error)
 		}
 		return fmt.Errorf("download failed: %s", string(body))
 	}
@@ -239,7 +244,7 @@ func (f *FilesClient) List(remotePath string, recursive bool) (*protocol.FileLis
 		body, _ := io.ReadAll(resp.Body)
 		var errResp protocol.ErrorResponse
 		if err := json.Unmarshal(body, &errResp); err == nil && errResp.Error != "" {
-			return nil, fmt.Errorf("%s", errResp.Error)
+			return nil, fmt.Errorf("server error: %s", errResp.Error)
 		}
 		return nil, fmt.Errorf("list failed: %s", string(body))
 	}
@@ -285,7 +290,7 @@ func (f *FilesClient) Delete(remotePath string, recursive bool) error {
 		respBody, _ := io.ReadAll(resp.Body)
 		var errResp protocol.ErrorResponse
 		if err := json.Unmarshal(respBody, &errResp); err == nil && errResp.Error != "" {
-			return fmt.Errorf("%s", errResp.Error)
+			return fmt.Errorf("server error: %s", errResp.Error)
 		}
 		return fmt.Errorf("delete failed: %s", string(respBody))
 	}

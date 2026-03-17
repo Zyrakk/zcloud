@@ -142,14 +142,9 @@ func (c *Config) SetSession(token string, expiresAt time.Time) {
 	c.Session.ExpiresAt = expiresAt
 }
 
-// IsSessionValid verifica si la sesión actual es válida (alias de HasValidSession)
-func (c *Config) IsSessionValid() bool {
-	return c.HasValidSession()
-}
-
 // SessionExpiresIn devuelve cuánto tiempo queda de sesión
 func (c *Config) SessionExpiresIn() time.Duration {
-	if !c.IsSessionValid() {
+	if !c.HasValidSession() {
 		return 0
 	}
 	return time.Until(c.Session.ExpiresAt)

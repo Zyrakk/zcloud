@@ -1,0 +1,24 @@
+# ZCloud Server - Development Configuration
+# Copy this file to configs/dev-config.yaml and adjust as needed.
+# DO NOT commit dev-config.yaml (it may contain secrets).
+
+server:
+  host: "0.0.0.0"
+  port: 8443
+  domain: "localhost"
+
+tls:
+  cert: ""
+  key: ""
+
+auth:
+  session_ttl: "12h"
+  totp_issuer: "ZCloud-Dev"
+  require_approval: true
+
+kubernetes:
+  kubeconfig: "/etc/rancher/k3s/k3s.yaml"
+  coredns_ip: "10.43.0.10:53"
+
+storage:
+  database: "/tmp/zcloud-dev/data/zcloud.db"
