@@ -42,5 +42,6 @@ configs/dev-config.yaml
 
 # AI assistant context files
 CLAUDE.md
+AGENTS.md
 CODEBASE_SUMMARY.md
 CHANGELOG_CONTEXT.md
