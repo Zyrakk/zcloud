@@ -355,11 +355,13 @@ func (a *API) handleLogin(w http.ResponseWriter, r *http.Request) {
 	tokenHash := hashToken(token)
 	ip := r.RemoteAddr
 	if err := a.db.CreateSession(sessionID, req.DeviceID, tokenHash, expiresAt, ip); err != nil {
-		log.Printf("Failed to save session: %v", err)
+		log.Printf("CRITICAL: Failed to save session (revocation will not work for this token): %v", err)
 	}
 
 	// Actualizar último acceso
-	_ = a.db.UpdateDeviceLastAccess(req.DeviceID)
+	if err := a.db.UpdateDeviceLastAccess(req.DeviceID); err != nil {
+		log.Printf("Failed to update device last access for %s: %v", req.DeviceID, err)
+	}
 
 	// Audit log
 	loginIP := r.RemoteAddr
@@ -385,7 +387,9 @@ func (a *API) handleLogout(w http.ResponseWriter, r *http.Request) {
 		// Revocar el token
 		tokenHash := hashToken(tokenString)
 		expiresAt := time.Now().Add(a.config.SessionTTL)
-		_ = a.db.RevokeToken(tokenHash, expiresAt, "user_logout")
+		if err := a.db.RevokeToken(tokenHash, expiresAt, "user_logout"); err != nil {
+			log.Printf("Failed to revoke token on logout for device %s: %v", deviceID, err)
+		}
 
 		// Audit log
 		logoutIP := r.RemoteAddr
@@ -396,7 +400,9 @@ func (a *API) handleLogout(w http.ResponseWriter, r *http.Request) {
 	a.auth.InvalidateDevice(deviceID)
 
 	// Eliminar sesiones del dispositivo
-	_ = a.db.DeleteDeviceSessions(deviceID)
+	if err := a.db.DeleteDeviceSessions(deviceID); err != nil {
+		log.Printf("Failed to delete sessions for device %s: %v", deviceID, err)
+	}
 
 	a.jsonResponse(w, map[string]string{"message": "Logged out"}, http.StatusOK)
 }
@@ -685,7 +691,10 @@ func (a *API) handleApproveDevice(w http.ResponseWriter, r *http.Request) {
 			a.jsonError(w, "failed to create user", http.StatusInternalServerError)
 			return
 		}
-		u, _ = a.db.GetUser(userID)
+		u, err = a.db.GetUser(userID)
+		if err != nil {
+			log.Printf("Failed to retrieve newly created user %s: %v", userID, err)
+		}
 	}
 	if u == nil {
 		a.jsonError(w, "failed to resolve user", http.StatusInternalServerError)
@@ -751,7 +760,9 @@ func (a *API) handleRevokeDevice(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Revocar todos los tokens del dispositivo
-	_ = a.db.RevokeDeviceTokens(deviceID)
+	if err := a.db.RevokeDeviceTokens(deviceID); err != nil {
+		log.Printf("Failed to revoke tokens for device %s: %v", deviceID, err)
+	}
 
 	// Eagerly evict cached tokens for this device
 	a.auth.InvalidateDevice(deviceID)
@@ -884,7 +895,9 @@ func (a *API) handleTOTPEnroll(w http.ResponseWriter, r *http.Request) {
 
 	// Ensure device is linked to the user (idempotent).
 	if device.UserID == "" {
-		_ = a.db.SetDeviceUserID(req.DeviceID, userID)
+		if err := a.db.SetDeviceUserID(req.DeviceID, userID); err != nil {
+			log.Printf("Failed to set user ID for device %s: %v", req.DeviceID, err)
+		}
 	}
 
 	secret, configured, err := a.db.GetUserTOTPSecret(userID)

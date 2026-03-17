@@ -457,21 +457,6 @@ func (al *AuditLogger) LogAudit(event, deviceID, details string) {
 	if al.logLevel == "disabled" {
 		return
 	}
-
-	timestamp := time.Now().Format("2006-01-02 15:04:05")
-	logEntry := fmt.Sprintf("[%s] AUDIT: %s device=%s details=%s",
-		timestamp, event, deviceID, details)
-
-	switch al.logLevel {
-	case "debug":
-		log.Print(logEntry)
-	case "info":
-		log.Print(logEntry)
-	case "warn":
-		log.Print(logEntry)
-	case "error":
-		log.Print(logEntry)
-	default:
-		log.Print(logEntry)
-	}
+	logEntry := fmt.Sprintf("AUDIT [%s] device=%s %s", event, deviceID, details)
+	log.Print(logEntry)
 }

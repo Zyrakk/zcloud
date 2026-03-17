@@ -28,6 +28,8 @@ var (
 	BuildTime = "unknown"
 )
 
+const defaultClusterName = client.DefaultClusterName
+
 func shortPrefix(s string, n int) string {
 	if n <= 0 {
 		return ""
@@ -397,7 +399,7 @@ func getClusterName(cfg *client.Config) string {
 	if cfg.Cluster.Name != "" {
 		return cfg.Cluster.Name
 	}
-	return "zcloud-homelab"
+	return defaultClusterName
 }
 
 // kubectlCmd proxies kubectl calls through the server.
@@ -916,7 +918,7 @@ func readManifest(path string) ([]string, error) {
 			}
 			name := entry.Name()
 			if strings.HasSuffix(name, ".yaml") || strings.HasSuffix(name, ".yml") {
-				content, err := readManifest(path + "/" + name)
+				content, err := readManifest(filepath.Join(path, name))
 				if err != nil {
 					return nil, err
 				}

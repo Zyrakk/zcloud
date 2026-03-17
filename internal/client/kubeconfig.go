@@ -9,6 +9,9 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// DefaultClusterName is the fallback cluster name when none is configured.
+const DefaultClusterName = "zcloud-homelab"
+
 // KubeConfig estructura del kubeconfig
 type KubeConfig struct {
 	APIVersion     string         `yaml:"apiVersion"`
@@ -66,7 +69,7 @@ func (c *Config) GenerateKubeconfig(token string) error {
 	// Usar valores por defecto si no están configurados
 	clusterName := c.Cluster.Name
 	if clusterName == "" {
-		clusterName = "zcloud-homelab"
+		clusterName = DefaultClusterName
 	}
 	contextName := c.Cluster.Context
 	if contextName == "" {

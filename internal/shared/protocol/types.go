@@ -26,8 +26,8 @@ type RegisterResponse struct {
 	DeviceID            string       `json:"device_id"`
 	Status              DeviceStatus `json:"status"`
 	Message             string       `json:"message,omitempty"`
-	TOTPSecret          string       `json:"totp_secret,omitempty"`           // Solo cuando approved
-	TOTPQR              string       `json:"totp_qr,omitempty"`               // QR en base64
+	TOTPSecret          string       `json:"totp_secret,omitempty"`           // Deprecated: not populated; TOTP is delivered via /totp/enroll only
+	TOTPQR              string       `json:"totp_qr,omitempty"`               // Deprecated: not populated; QR is delivered via /totp/enroll only
 	EnrollmentCode      string       `json:"enrollment_code,omitempty"`       // Solo cuando se genera un código de enrolamiento
 	EnrollmentExpiresAt time.Time    `json:"enrollment_expires_at,omitempty"` // Expiración del enrolamiento
 }
