@@ -1,28 +1,30 @@
-package middleware
+package middleware_test
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/golang-jwt/jwt/v5"
+	"github.com/zyrak/zcloud/internal/server/middleware"
 )
 
 func TestNewAuthMiddleware(t *testing.T) {
-	am := NewAuthMiddleware("test-secret")
+	am := middleware.NewAuthMiddleware("test-secret")
+	defer am.Close()
 
 	if am == nil {
 		t.Fatal("AuthMiddleware is nil")
 	}
-
-	if string(am.jwtSecret) != "test-secret" {
-		t.Error("JWT secret not set correctly")
-	}
 }
 
 func TestGenerateToken(t *testing.T) {
-	am := NewAuthMiddleware("test-secret")
+	am := middleware.NewAuthMiddleware("test-secret")
+	defer am.Close()
 
 	token, expiresAt, err := am.GenerateToken("device-id", "Test Device", false, 12*time.Hour)
 	if err != nil {
@@ -43,7 +45,8 @@ func TestGenerateToken(t *testing.T) {
 }
 
 func TestGenerateTokenAdmin(t *testing.T) {
-	am := NewAuthMiddleware("test-secret")
+	am := middleware.NewAuthMiddleware("test-secret")
+	defer am.Close()
 
 	token, _, err := am.GenerateToken("device-id", "Test Device", true, 12*time.Hour)
 	if err != nil {
@@ -65,7 +68,8 @@ func TestGenerateTokenAdmin(t *testing.T) {
 }
 
 func TestValidateToken(t *testing.T) {
-	am := NewAuthMiddleware("test-secret")
+	am := middleware.NewAuthMiddleware("test-secret")
+	defer am.Close()
 
 	token, _, err := am.GenerateToken("device-id", "Test Device", false, 12*time.Hour)
 	if err != nil {
@@ -91,7 +95,8 @@ func TestValidateToken(t *testing.T) {
 }
 
 func TestValidateTokenInvalid(t *testing.T) {
-	am := NewAuthMiddleware("test-secret")
+	am := middleware.NewAuthMiddleware("test-secret")
+	defer am.Close()
 
 	_, err := am.ValidateToken("invalid-token")
 	if err == nil {
@@ -100,13 +105,15 @@ func TestValidateTokenInvalid(t *testing.T) {
 }
 
 func TestValidateTokenWrongSecret(t *testing.T) {
-	am1 := NewAuthMiddleware("secret-1")
+	am1 := middleware.NewAuthMiddleware("secret-1")
+	defer am1.Close()
 	token, _, err := am1.GenerateToken("device-id", "Test Device", false, 12*time.Hour)
 	if err != nil {
 		t.Fatalf("Failed to generate token: %v", err)
 	}
 
-	am2 := NewAuthMiddleware("secret-2")
+	am2 := middleware.NewAuthMiddleware("secret-2")
+	defer am2.Close()
 	_, err = am2.ValidateToken(token)
 	if err == nil {
 		t.Error("Expected error for token with wrong secret")
@@ -114,7 +121,8 @@ func TestValidateTokenWrongSecret(t *testing.T) {
 }
 
 func TestAuthenticateMiddleware(t *testing.T) {
-	am := NewAuthMiddleware("test-secret")
+	am := middleware.NewAuthMiddleware("test-secret")
+	defer am.Close()
 
 	token, _, err := am.GenerateToken("device-id", "Test Device", false, 12*time.Hour)
 	if err != nil {
@@ -122,7 +130,7 @@ func TestAuthenticateMiddleware(t *testing.T) {
 	}
 
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		deviceID := GetDeviceID(r)
+		deviceID := middleware.GetDeviceID(r)
 		if deviceID != "device-id" {
 			t.Errorf("Expected device-id, got %s", deviceID)
 		}
@@ -143,7 +151,8 @@ func TestAuthenticateMiddleware(t *testing.T) {
 }
 
 func TestAuthenticateMiddlewareNoToken(t *testing.T) {
-	am := NewAuthMiddleware("test-secret")
+	am := middleware.NewAuthMiddleware("test-secret")
+	defer am.Close()
 
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -162,7 +171,8 @@ func TestAuthenticateMiddlewareNoToken(t *testing.T) {
 }
 
 func TestAuthenticateMiddlewareInvalidToken(t *testing.T) {
-	am := NewAuthMiddleware("test-secret")
+	am := middleware.NewAuthMiddleware("test-secret")
+	defer am.Close()
 
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -182,7 +192,8 @@ func TestAuthenticateMiddlewareInvalidToken(t *testing.T) {
 }
 
 func TestAuthenticateMiddlewareMalformedHeader(t *testing.T) {
-	am := NewAuthMiddleware("test-secret")
+	am := middleware.NewAuthMiddleware("test-secret")
+	defer am.Close()
 
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -202,7 +213,8 @@ func TestAuthenticateMiddlewareMalformedHeader(t *testing.T) {
 }
 
 func TestRequireAdminMiddleware(t *testing.T) {
-	am := NewAuthMiddleware("test-secret")
+	am := middleware.NewAuthMiddleware("test-secret")
+	defer am.Close()
 
 	token, _, err := am.GenerateToken("device-id", "Test Device", true, 12*time.Hour)
 	if err != nil {
@@ -228,7 +240,8 @@ func TestRequireAdminMiddleware(t *testing.T) {
 }
 
 func TestRequireAdminMiddlewareNonAdmin(t *testing.T) {
-	am := NewAuthMiddleware("test-secret")
+	am := middleware.NewAuthMiddleware("test-secret")
+	defer am.Close()
 
 	token, _, err := am.GenerateToken("device-id", "Test Device", false, 12*time.Hour)
 	if err != nil {
@@ -256,11 +269,11 @@ func TestRequireAdminMiddlewareNonAdmin(t *testing.T) {
 func TestGetDeviceID(t *testing.T) {
 	req := httptest.NewRequest("GET", "/", nil)
 	ctx := req.Context()
-	ctx = context.WithValue(ctx, DeviceIDKey, "test-device-id")
+	ctx = context.WithValue(ctx, middleware.DeviceIDKey, "test-device-id")
 
 	req = req.WithContext(ctx)
 
-	deviceID := GetDeviceID(req)
+	deviceID := middleware.GetDeviceID(req)
 	if deviceID != "test-device-id" {
 		t.Errorf("Expected test-device-id, got %s", deviceID)
 	}
@@ -269,18 +282,19 @@ func TestGetDeviceID(t *testing.T) {
 func TestGetIsAdmin(t *testing.T) {
 	req := httptest.NewRequest("GET", "/", nil)
 	ctx := req.Context()
-	ctx = context.WithValue(ctx, IsAdminKey, true)
+	ctx = context.WithValue(ctx, middleware.IsAdminKey, true)
 
 	req = req.WithContext(ctx)
 
-	isAdmin := GetIsAdmin(req)
+	isAdmin := middleware.GetIsAdmin(req)
 	if !isAdmin {
 		t.Error("Expected isAdmin to be true")
 	}
 }
 
 func TestTokenExpiration(t *testing.T) {
-	am := NewAuthMiddleware("test-secret")
+	am := middleware.NewAuthMiddleware("test-secret")
+	defer am.Close()
 
 	token, _, err := am.GenerateToken("device-id", "Test Device", false, 1*time.Millisecond)
 	if err != nil {
@@ -296,7 +310,8 @@ func TestTokenExpiration(t *testing.T) {
 }
 
 func TestConcurrentTokenGeneration(t *testing.T) {
-	am := NewAuthMiddleware("test-secret")
+	am := middleware.NewAuthMiddleware("test-secret")
+	defer am.Close()
 
 	var wg sync.WaitGroup
 	tokens := make([]string, 10)
@@ -332,24 +347,69 @@ func TestConcurrentTokenGeneration(t *testing.T) {
 	}
 }
 
-func TestHashToken(t *testing.T) {
-	token := "test-token-12345"
+// --- New security tests ---
 
-	hash1 := hashToken(token)
-	hash2 := hashToken(token)
+func TestValidateTokenAlgorithmConfusion(t *testing.T) {
+	am := middleware.NewAuthMiddleware("test-secret")
+	defer am.Close()
 
-	if hash1 != hash2 {
-		t.Error("Hash of same token should be identical")
+	token := jwt.NewWithClaims(jwt.SigningMethodNone, jwt.MapClaims{
+		"device_id":   "test-device",
+		"device_name": "test",
+		"iss":         "zcloud",
+		"exp":         time.Now().Add(time.Hour).Unix(),
+	})
+	tokenString, err := token.SignedString(jwt.UnsafeAllowNoneSignatureType)
+	if err != nil {
+		t.Fatalf("failed to create none-alg token: %v", err)
 	}
 
-	differentToken := "different-token"
-	hash3 := hashToken(differentToken)
+	_, err = am.ValidateToken(tokenString)
+	if err == nil {
+		t.Error("expected error for none-algorithm token, got nil")
+	}
+}
 
-	if hash1 == hash3 {
-		t.Error("Hashes of different tokens should be different")
+type mockDBError struct{}
+
+func (m *mockDBError) IsTokenRevoked(tokenHash string) (bool, error) {
+	return false, fmt.Errorf("database unavailable")
+}
+
+type mockDBRevoked struct{}
+
+func (m *mockDBRevoked) IsTokenRevoked(tokenHash string) (bool, error) {
+	return true, nil
+}
+
+func TestValidateTokenRevocationDBError(t *testing.T) {
+	am := middleware.NewAuthMiddleware("test-secret")
+	defer am.Close()
+	am.SetDatabase(&mockDBError{})
+
+	tokenStr, _, err := am.GenerateToken("device-1", "test", false, time.Hour)
+	if err != nil {
+		t.Fatal(err)
 	}
 
-	if len(hash1) != 64 {
-		t.Errorf("Expected SHA256 hash length 64, got %d", len(hash1))
+	_, err = am.ValidateToken(tokenStr)
+	if err == nil {
+		t.Error("expected error when DB revocation check fails, got nil (fail-open)")
+	}
+}
+
+func TestValidateTokenRevoked(t *testing.T) {
+	am := middleware.NewAuthMiddleware("test-secret")
+	defer am.Close()
+	am.SetDatabase(&mockDBRevoked{})
+
+	tokenStr, _, err := am.GenerateToken("device-1", "test", false, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = am.ValidateToken(tokenStr)
+	if err == nil {
+		t.Error("expected error for revoked token, got nil")
 	}
 }

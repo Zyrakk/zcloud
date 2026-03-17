@@ -46,6 +46,7 @@ type AuthMiddleware struct {
 	tokenCache   map[string]*tokenCacheEntry
 	tokenCacheMu sync.RWMutex
 	cacheTTL     time.Duration
+	done         chan struct{}
 }
 
 // NewAuthMiddleware crea un nuevo middleware de autenticación
@@ -55,6 +56,7 @@ func NewAuthMiddleware(jwtSecret string) *AuthMiddleware {
 		db:         nil,
 		tokenCache: make(map[string]*tokenCacheEntry),
 		cacheTTL:   30 * time.Second, // Cache validated tokens for 30 seconds
+		done:       make(chan struct{}),
 	}
 
 	// Start background cleanup goroutine
@@ -63,24 +65,34 @@ func NewAuthMiddleware(jwtSecret string) *AuthMiddleware {
 	return m
 }
 
+// Close stops the background cleanup goroutine.
+func (m *AuthMiddleware) Close() {
+	close(m.done)
+}
+
 // cleanupExpiredCache periodically removes expired entries from the token cache
 func (m *AuthMiddleware) cleanupExpiredCache() {
 	ticker := time.NewTicker(1 * time.Minute)
 	defer ticker.Stop()
-
-	for range ticker.C {
-		m.tokenCacheMu.Lock()
-		now := time.Now()
-		for hash, entry := range m.tokenCache {
-			if now.After(entry.expiresAt) {
-				delete(m.tokenCache, hash)
+	for {
+		select {
+		case <-m.done:
+			return
+		case <-ticker.C:
+			m.tokenCacheMu.Lock()
+			now := time.Now()
+			for k, v := range m.tokenCache {
+				if now.After(v.expiresAt) {
+					delete(m.tokenCache, k)
+				}
 			}
+			m.tokenCacheMu.Unlock()
 		}
-		m.tokenCacheMu.Unlock()
 	}
 }
 
-// SetDatabase sets of database for token revocation checking
+// SetDatabase sets the database for token revocation checks.
+// Must be called before the server starts accepting requests.
 func (m *AuthMiddleware) SetDatabase(db interface {
 	IsTokenRevoked(tokenHash string) (bool, error)
 }) {
@@ -134,6 +146,9 @@ func (m *AuthMiddleware) ValidateToken(tokenString string) (*JWTClaims, error) {
 
 	// Cache miss - parse and validate the token
 	token, err := jwt.ParseWithClaims(tokenString, &JWTClaims{}, func(token *jwt.Token) (interface{}, error) {
+		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
+			return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
+		}
 		return m.jwtSecret, nil
 	})
 
@@ -146,10 +161,9 @@ func (m *AuthMiddleware) ValidateToken(tokenString string) (*JWTClaims, error) {
 		if m.db != nil {
 			revoked, err := m.db.IsTokenRevoked(tokenHash)
 			if err != nil {
-				// Log the error but don't fail - the JWT signature is already valid
-				// This prevents database contention from breaking authentication
-				log.Printf("Warning: failed to check token revocation (proceeding): %v", err)
-			} else if revoked {
+				return nil, fmt.Errorf("revocation check failed: %w", err)
+			}
+			if revoked {
 				return nil, jwt.ErrTokenInvalidClaims
 			}
 		}
@@ -274,10 +288,35 @@ func (rl *RateLimiter) Limit(next http.Handler) http.Handler {
 		// Registrar request
 		rl.requests[ip] = append(rl.requests[ip], now)
 
+		// Trigger cleanup when map grows large to prevent unbounded memory growth
+		if len(rl.requests) > 10000 {
+			go rl.cleanup()
+		}
+
 		rl.mu.Unlock()
 
 		next.ServeHTTP(w, r)
 	})
+}
+
+// cleanup removes stale IP entries from the rate limiter map.
+func (rl *RateLimiter) cleanup() {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+	now := time.Now()
+	for ip, times := range rl.requests {
+		valid := times[:0]
+		for _, t := range times {
+			if now.Sub(t) <= rl.window {
+				valid = append(valid, t)
+			}
+		}
+		if len(valid) == 0 {
+			delete(rl.requests, ip)
+		} else {
+			rl.requests[ip] = valid
+		}
+	}
 }
 
 func clientIP(r *http.Request) string {
@@ -306,20 +345,30 @@ func clientIP(r *http.Request) string {
 	return host
 }
 
-// CORS middleware para CORS
+// CORSWithOrigin returns a CORS middleware that sets the given allowed origin.
+// If allowedOrigin is empty, it defaults to "*".
+func CORSWithOrigin(allowedOrigin string) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			origin := allowedOrigin
+			if origin == "" {
+				origin = "*"
+			}
+			w.Header().Set("Access-Control-Allow-Origin", origin)
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Device-ID")
+			if r.Method == "OPTIONS" {
+				w.WriteHeader(http.StatusOK)
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
+// Deprecated: Use CORSWithOrigin with an explicit origin instead.
 func CORS(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Device-ID")
-
-		if r.Method == "OPTIONS" {
-			w.WriteHeader(http.StatusOK)
-			return
-		}
-
-		next.ServeHTTP(w, r)
-	})
+	return CORSWithOrigin("")(next)
 }
 
 // SecurityHeaders middleware sets security-related HTTP headers
@@ -338,7 +387,7 @@ func SecurityHeaders(next http.Handler) http.Handler {
 		w.Header().Set("X-XSS-Protection", "1; mode=block")
 
 		// Strict-Transport-Security (only on HTTPS)
-		if r.URL.Scheme == "https" || r.Header.Get("X-Forwarded-Proto") == "https" {
+		if r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https" {
 			w.Header().Set("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
 		}
 
