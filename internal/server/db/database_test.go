@@ -1,6 +1,7 @@
 package db
 
 import (
+	"fmt"
 	"os"
 	"testing"
 	"time"
@@ -13,15 +14,18 @@ func setupTestDB(t *testing.T) *Database {
 	if err != nil {
 		t.Fatal(err)
 	}
+	tmpPath := tmpfile.Name()
+	tmpfile.Close()
 
-	db, err := New(tmpfile.Name())
+	db, err := New(tmpPath)
 	if err != nil {
+		os.Remove(tmpPath)
 		t.Fatal(err)
 	}
 
 	t.Cleanup(func() {
 		db.Close()
-		os.Remove(tmpfile.Name())
+		os.Remove(tmpPath)
 	})
 
 	return db
@@ -404,5 +408,113 @@ func TestRevokeDeviceTokens(t *testing.T) {
 
 	if !revoked {
 		t.Error("Expected token to be revoked")
+	}
+}
+
+func TestDatabasePragmas(t *testing.T) {
+	database := setupTestDB(t)
+
+	var journalMode string
+	err := database.DB().QueryRow("PRAGMA journal_mode").Scan(&journalMode)
+	if err != nil {
+		t.Fatalf("failed to query journal_mode: %v", err)
+	}
+	if journalMode != "wal" {
+		t.Errorf("expected journal_mode=wal, got %s", journalMode)
+	}
+
+	var busyTimeout int
+	err = database.DB().QueryRow("PRAGMA busy_timeout").Scan(&busyTimeout)
+	if err != nil {
+		t.Fatalf("failed to query busy_timeout: %v", err)
+	}
+	if busyTimeout != 5000 {
+		t.Errorf("expected busy_timeout=5000, got %d", busyTimeout)
+	}
+
+	var foreignKeys int
+	err = database.DB().QueryRow("PRAGMA foreign_keys").Scan(&foreignKeys)
+	if err != nil {
+		t.Fatalf("failed to query foreign_keys: %v", err)
+	}
+	if foreignKeys != 1 {
+		t.Errorf("expected foreign_keys=1, got %d", foreignKeys)
+	}
+}
+
+func TestRevokeDeviceTokensAtomic(t *testing.T) {
+	database := setupTestDB(t)
+
+	device := &protocol.DeviceInfo{
+		ID: "atomic-test", Name: "test", PublicKey: "pk-atomic",
+		Hostname: "host", OS: "linux", Status: protocol.DeviceStatusApproved,
+		CreatedAt: time.Now(),
+	}
+	if err := database.CreateDevice(device, "secret"); err != nil {
+		t.Fatal(err)
+	}
+
+	expires := time.Now().Add(1 * time.Hour)
+	for i := 0; i < 3; i++ {
+		sid := fmt.Sprintf("session-%d", i)
+		th := fmt.Sprintf("token-hash-%d", i)
+		if err := database.CreateSession(sid, "atomic-test", th, expires, "127.0.0.1"); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if err := database.RevokeDeviceTokens("atomic-test"); err != nil {
+		t.Fatalf("RevokeDeviceTokens failed: %v", err)
+	}
+
+	for i := 0; i < 3; i++ {
+		th := fmt.Sprintf("token-hash-%d", i)
+		revoked, err := database.IsTokenRevoked(th)
+		if err != nil {
+			t.Fatalf("IsTokenRevoked failed: %v", err)
+		}
+		if !revoked {
+			t.Errorf("token %s should be revoked", th)
+		}
+	}
+
+	sessions, err := database.GetActiveSessions()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, s := range sessions {
+		if s["device_id"] == "atomic-test" {
+			t.Error("sessions for device should have been deleted")
+		}
+	}
+}
+
+func TestUpdateDeviceStatusNonexistent(t *testing.T) {
+	database := setupTestDB(t)
+
+	err := database.UpdateDeviceStatus("nonexistent-id", protocol.DeviceStatusApproved)
+	if err == nil {
+		t.Error("expected error for nonexistent device, got nil")
+	}
+}
+
+func TestListDevicesRowsErr(t *testing.T) {
+	database := setupTestDB(t)
+
+	device := &protocol.DeviceInfo{
+		ID: "test-rows-err", Name: "test", PublicKey: "pk-rows-err",
+		Hostname: "host", OS: "linux", Status: protocol.DeviceStatusPending,
+		CreatedAt: time.Now(),
+	}
+	if err := database.CreateDevice(device, "secret"); err != nil {
+		t.Fatal(err)
+	}
+
+	devices, err := database.ListDevices()
+	if err != nil {
+		t.Fatalf("ListDevices failed: %v", err)
+	}
+	if len(devices) != 1 {
+		t.Errorf("expected 1 device, got %d", len(devices))
 	}
 }

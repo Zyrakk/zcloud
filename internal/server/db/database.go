@@ -16,6 +16,9 @@ type Database struct {
 	db *sql.DB
 }
 
+// DB returns the underlying *sql.DB (used for testing).
+func (d *Database) DB() *sql.DB { return d.db }
+
 // New crea una nueva conexión a la base de datos
 func New(path string) (*Database, error) {
 	db, err := sql.Open("sqlite", path)
@@ -23,9 +26,23 @@ func New(path string) (*Database, error) {
 		return nil, fmt.Errorf("failed to open database: %w", err)
 	}
 
-	// Crear tablas
+	pragmas := []string{
+		"PRAGMA journal_mode=WAL",
+		"PRAGMA busy_timeout=5000",
+		"PRAGMA foreign_keys=ON",
+	}
+	for _, p := range pragmas {
+		if _, err := db.Exec(p); err != nil {
+			db.Close()
+			return nil, fmt.Errorf("failed to set pragma %q: %w", p, err)
+		}
+	}
+
+	db.SetMaxOpenConns(1)
+
 	if err := createTables(db); err != nil {
-		return nil, err
+		db.Close()
+		return nil, fmt.Errorf("failed to create tables: %w", err)
 	}
 
 	return &Database{db: db}, nil
@@ -212,36 +229,64 @@ func (d *Database) GetTOTPSecret(deviceID string) (string, error) {
 
 // UpdateDeviceStatus actualiza el estado de un dispositivo
 func (d *Database) UpdateDeviceStatus(id string, status protocol.DeviceStatus) error {
-	_, err := d.db.Exec(`UPDATE devices SET status = ? WHERE id = ?`, status, id)
+	res, err := d.db.Exec(`UPDATE devices SET status = ? WHERE id = ?`, status, id)
 	if err != nil {
 		return fmt.Errorf("failed to update device status: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("failed to check rows affected: %w", err)
+	}
+	if n == 0 {
+		return fmt.Errorf("device %s not found", id)
 	}
 	return nil
 }
 
 // UpdateDeviceTOTP actualiza el secreto TOTP de un dispositivo
 func (d *Database) UpdateDeviceTOTP(id string, totpSecret string) error {
-	_, err := d.db.Exec(`UPDATE devices SET totp_secret = ? WHERE id = ?`, totpSecret, id)
+	res, err := d.db.Exec(`UPDATE devices SET totp_secret = ? WHERE id = ?`, totpSecret, id)
 	if err != nil {
 		return fmt.Errorf("failed to update device TOTP: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("failed to check rows affected: %w", err)
+	}
+	if n == 0 {
+		return fmt.Errorf("device %s not found", id)
 	}
 	return nil
 }
 
 // UpdateDeviceLastAccess actualiza el último acceso de un dispositivo
 func (d *Database) UpdateDeviceLastAccess(id string) error {
-	_, err := d.db.Exec(`UPDATE devices SET last_access = ? WHERE id = ?`, time.Now(), id)
+	res, err := d.db.Exec(`UPDATE devices SET last_access = ? WHERE id = ?`, time.Now(), id)
 	if err != nil {
 		return fmt.Errorf("failed to update device last access: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("failed to check rows affected: %w", err)
+	}
+	if n == 0 {
+		return fmt.Errorf("device %s not found", id)
 	}
 	return nil
 }
 
 // SetDeviceUserID asigna un dispositivo a un usuario.
 func (d *Database) SetDeviceUserID(deviceID, userID string) error {
-	_, err := d.db.Exec(`UPDATE devices SET user_id = ? WHERE id = ?`, userID, deviceID)
+	res, err := d.db.Exec(`UPDATE devices SET user_id = ? WHERE id = ?`, userID, deviceID)
 	if err != nil {
 		return fmt.Errorf("failed to set device user_id: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("failed to check rows affected: %w", err)
+	}
+	if n == 0 {
+		return fmt.Errorf("device %s not found", deviceID)
 	}
 	return nil
 }
@@ -276,6 +321,9 @@ func (d *Database) ListDevices() ([]protocol.DeviceInfo, error) {
 
 		devices = append(devices, device)
 	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating devices: %w", err)
+	}
 
 	return devices, nil
 }
@@ -296,9 +344,16 @@ func (d *Database) SetAdmin(deviceID string, isAdmin bool) error {
 	if isAdmin {
 		val = 1
 	}
-	_, err := d.db.Exec(`UPDATE devices SET is_admin = ? WHERE id = ?`, val, deviceID)
+	res, err := d.db.Exec(`UPDATE devices SET is_admin = ? WHERE id = ?`, val, deviceID)
 	if err != nil {
 		return fmt.Errorf("failed to set admin: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("failed to check rows affected: %w", err)
+	}
+	if n == 0 {
+		return fmt.Errorf("device %s not found", deviceID)
 	}
 	return nil
 }
@@ -378,6 +433,9 @@ func (d *Database) ListUsers() ([]User, error) {
 		}
 		users = append(users, u)
 	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating users: %w", err)
+	}
 	return users, nil
 }
 
@@ -406,9 +464,16 @@ func (d *Database) GetUserTOTPSecret(userID string) (secret string, configured b
 
 // UpdateUserTOTPSecret rotates the user's TOTP secret and resets the configured marker.
 func (d *Database) UpdateUserTOTPSecret(userID, totpSecret string) error {
-	_, err := d.db.Exec(`UPDATE users SET totp_secret = ?, totp_configured_at = NULL WHERE id = ?`, totpSecret, userID)
+	res, err := d.db.Exec(`UPDATE users SET totp_secret = ?, totp_configured_at = NULL WHERE id = ?`, totpSecret, userID)
 	if err != nil {
 		return fmt.Errorf("failed to update user totp secret: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("failed to check rows affected: %w", err)
+	}
+	if n == 0 {
+		return fmt.Errorf("user %s not found", userID)
 	}
 	return nil
 }
@@ -493,40 +558,72 @@ func (d *Database) CreateSession(id, deviceID, tokenHash string, expiresAt time.
 
 // RevokeDeviceTokens revoca todos los tokens de un dispositivo
 func (d *Database) RevokeDeviceTokens(deviceID string) error {
-	// Obtener todos los tokens del dispositivo
-	rows, err := d.db.Query(`SELECT token_hash, expires_at FROM sessions WHERE device_id = ?`, deviceID)
+	tx, err := d.db.Begin()
+	if err != nil {
+		return fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	rows, err := tx.Query(
+		`SELECT token_hash, expires_at FROM sessions WHERE device_id = ?`,
+		deviceID,
+	)
 	if err != nil {
 		return fmt.Errorf("failed to query device sessions: %w", err)
 	}
-	defer rows.Close()
 
-	var tokenHashes []string
-	var expiresAts []time.Time
+	type tokenEntry struct {
+		hash      string
+		expiresAt time.Time
+	}
+	var tokens []tokenEntry
 
 	for rows.Next() {
-		var tokenHash string
-		var expiresAt time.Time
-		if err := rows.Scan(&tokenHash, &expiresAt); err != nil {
-			continue
+		var te tokenEntry
+		if err := rows.Scan(&te.hash, &te.expiresAt); err != nil {
+			rows.Close()
+			return fmt.Errorf("failed to scan session: %w", err)
 		}
-		tokenHashes = append(tokenHashes, tokenHash)
-		expiresAts = append(expiresAts, expiresAt)
+		tokens = append(tokens, te)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("error iterating sessions: %w", err)
 	}
 
-	// Revocar todos los tokens
-	for i, tokenHash := range tokenHashes {
-		_ = d.RevokeToken(tokenHash, expiresAts[i], "device_revoked")
+	for _, te := range tokens {
+		_, err := tx.Exec(
+			`INSERT OR IGNORE INTO revoked_tokens (token_hash, revoked_at, expires_at, reason) VALUES (?, ?, ?, ?)`,
+			te.hash, time.Now(), te.expiresAt, "device_revoked",
+		)
+		if err != nil {
+			return fmt.Errorf("failed to revoke token: %w", err)
+		}
 	}
 
-	// Eliminar sesiones del dispositivo
-	return d.DeleteDeviceSessions(deviceID)
+	_, err = tx.Exec(`DELETE FROM sessions WHERE device_id = ?`, deviceID)
+	if err != nil {
+		return fmt.Errorf("failed to delete sessions: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("failed to commit transaction: %w", err)
+	}
+	return nil
 }
 
 // DeleteSession elimina una sesión
 func (d *Database) DeleteSession(id string) error {
-	_, err := d.db.Exec(`DELETE FROM sessions WHERE id = ?`, id)
+	res, err := d.db.Exec(`DELETE FROM sessions WHERE id = ?`, id)
 	if err != nil {
 		return fmt.Errorf("failed to delete session: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("failed to check rows affected: %w", err)
+	}
+	if n == 0 {
+		return fmt.Errorf("session %s not found", id)
 	}
 	return nil
 }
@@ -546,6 +643,10 @@ func (d *Database) CleanExpiredSessions() error {
 	if err != nil {
 		return fmt.Errorf("failed to clean expired sessions: %w", err)
 	}
+	_, err = d.db.Exec(`DELETE FROM revoked_tokens WHERE expires_at < ?`, time.Now())
+	if err != nil {
+		return fmt.Errorf("failed to clean expired revoked tokens: %w", err)
+	}
 	return nil
 }
 
@@ -563,18 +664,14 @@ func (d *Database) RevokeToken(tokenHash string, expiresAt time.Time, reason str
 
 // IsTokenRevoked verifica si un token está revocado
 func (d *Database) IsTokenRevoked(tokenHash string) (bool, error) {
-	// Limpiar tokens revocados expirados primero
-	_, err := d.db.Exec(`DELETE FROM revoked_tokens WHERE expires_at < ?`, time.Now())
-	if err != nil {
-		return false, fmt.Errorf("failed to clean expired revoked tokens: %w", err)
-	}
-
 	var count int
-	err = d.db.QueryRow(`SELECT COUNT(*) FROM revoked_tokens WHERE token_hash = ?`, tokenHash).Scan(&count)
+	err := d.db.QueryRow(
+		`SELECT COUNT(*) FROM revoked_tokens WHERE token_hash = ?`,
+		tokenHash,
+	).Scan(&count)
 	if err != nil {
 		return false, fmt.Errorf("failed to check token revocation: %w", err)
 	}
-
 	return count > 0, nil
 }
 
@@ -609,6 +706,9 @@ func (d *Database) GetActiveSessions() ([]map[string]interface{}, error) {
 			"expires_at":  expiresAt,
 			"ip_address":  ip,
 		})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating sessions: %w", err)
 	}
 
 	return sessions, nil
