@@ -1,10 +1,8 @@
 package main
 
 import (
-	"crypto/rand"
-	"crypto/sha256"
+	"context"
 	"crypto/tls"
-	"encoding/hex"
 	"flag"
 	"fmt"
 	"log"
@@ -115,6 +113,7 @@ func main() {
 	// Parsear session TTL
 	sessionTTL, err := time.ParseDuration(config.Auth.SessionTTL)
 	if err != nil {
+		log.Printf("Warning: invalid session TTL %q, using default 12h: %v", config.Auth.SessionTTL, err)
 		sessionTTL = 12 * time.Hour
 	}
 
@@ -123,7 +122,6 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to connect to database: %v", err)
 	}
-	defer database.Close()
 
 	// Crear API
 	apiConfig := &api.Config{
@@ -142,9 +140,10 @@ func main() {
 	// Configurar servidor HTTP
 	addr := fmt.Sprintf("%s:%d", config.Server.Host, config.Server.Port)
 	server := &http.Server{
-		Addr:        addr,
-		Handler:     apiServer.Router(),
-		ReadTimeout: 30 * time.Second,
+		Addr:              addr,
+		Handler:           apiServer.Router(),
+		ReadTimeout:       30 * time.Second,
+		ReadHeaderTimeout: 10 * time.Second,
 		// WriteTimeout must be 0 to support long-lived connections like kubectl watch/exec/logs
 		// The k8s proxy handler manages timeouts per-request for non-streaming requests
 		WriteTimeout: 0,
@@ -165,12 +164,18 @@ func main() {
 	}
 
 	// Limpieza de sesiones expiradas cada hora
+	done := make(chan struct{})
 	go func() {
-		ticker := time.NewTicker(time.Hour)
+		ticker := time.NewTicker(1 * time.Hour)
 		defer ticker.Stop()
-		for range ticker.C {
-			if err := database.CleanExpiredSessions(); err != nil {
-				log.Printf("Failed to clean expired sessions: %v", err)
+		for {
+			select {
+			case <-done:
+				return
+			case <-ticker.C:
+				if err := database.CleanExpiredSessions(); err != nil {
+					log.Printf("Failed to clean expired sessions: %v", err)
+				}
 			}
 		}
 	}()
@@ -180,8 +185,12 @@ func main() {
 		sigChan := make(chan os.Signal, 1)
 		signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 		<-sigChan
-		log.Println("Shutting down server...")
-		server.Close()
+		log.Println("Shutting down server gracefully...")
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer shutdownCancel()
+		if err := server.Shutdown(shutdownCtx); err != nil {
+			log.Printf("Server forced shutdown after 10s timeout: %v", err)
+		}
 	}()
 
 	// Iniciar servidor
@@ -199,6 +208,10 @@ func main() {
 		}
 	}
 
+	// Clean shutdown: stop background goroutine, close API resources, then database
+	close(done)
+	apiServer.Close()
+	database.Close()
 	log.Println("Server stopped")
 }
 
@@ -350,7 +363,7 @@ func loadOrCreateJWTSecret(path string) (string, error) {
 	// Intentar leer secret existente
 	data, err := os.ReadFile(path)
 	if err == nil {
-		return string(data), nil
+		return strings.TrimSpace(string(data)), nil
 	}
 
 	// Generar nuevo secret
@@ -371,7 +384,8 @@ func loadOrCreateJWTSecret(path string) (string, error) {
 func initServer(configPath string) error {
 	fmt.Println("🔧 Initializing zcloud-server...")
 
-	// Crear directorios
+	// Paths are hardcoded here because initServer runs via --init before any config
+	// file exists. These defaults match the default config template written below.
 	dirs := []string{
 		"/opt/zcloud-server/data",
 		"/opt/zcloud-server/certs",
@@ -695,9 +709,13 @@ func adminApproveDevice(database *db.Database, deviceID string, userName string,
 	}
 
 	// Create one-time enrollment code for the user to retrieve the secret in their terminal.
-	enrollmentCode := generateEnrollmentCode()
+	enrollmentCode, err := crypto.GenerateEnrollmentCode()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error generating enrollment code: %v\n", err)
+		os.Exit(1)
+	}
 	expiresAt := time.Now().Add(10 * time.Minute)
-	if err := database.CreateTOTPEnrollment(hashEnrollmentCode(enrollmentCode), device.ID, u.ID, expiresAt); err != nil {
+	if err := database.CreateTOTPEnrollment(crypto.HashEnrollmentCode(enrollmentCode), device.ID, u.ID, expiresAt); err != nil {
 		fmt.Fprintf(os.Stderr, "Error creating enrollment code: %v\n", err)
 		os.Exit(1)
 	}
@@ -748,9 +766,13 @@ func adminRotateUserTOTP(database *db.Database, userName string, deviceID string
 		os.Exit(1)
 	}
 
-	enrollmentCode := generateEnrollmentCode()
+	enrollmentCode, err := crypto.GenerateEnrollmentCode()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error generating enrollment code: %v\n", err)
+		os.Exit(1)
+	}
 	expiresAt := time.Now().Add(10 * time.Minute)
-	if err := database.CreateTOTPEnrollment(hashEnrollmentCode(enrollmentCode), device.ID, u.ID, expiresAt); err != nil {
+	if err := database.CreateTOTPEnrollment(crypto.HashEnrollmentCode(enrollmentCode), device.ID, u.ID, expiresAt); err != nil {
 		fmt.Fprintf(os.Stderr, "Error creating enrollment code: %v\n", err)
 		os.Exit(1)
 	}
@@ -823,24 +845,3 @@ func shortPrefix(s string, n int) string {
 	return s[:n]
 }
 
-func hashEnrollmentCode(code string) string {
-	sum := sha256.Sum256([]byte(strings.TrimSpace(code)))
-	return hex.EncodeToString(sum[:])
-}
-
-func generateEnrollmentCode() string {
-	const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
-	const n = 12
-
-	var b [n]byte
-	if _, err := rand.Read(b[:]); err != nil {
-		return strings.ToUpper(strings.ReplaceAll(uuid.New().String()[:12], "-", ""))
-	}
-
-	out := make([]byte, n)
-	for i := 0; i < n; i++ {
-		out[i] = alphabet[int(b[i])%len(alphabet)]
-	}
-
-	return fmt.Sprintf("%s-%s-%s", out[0:4], out[4:8], out[8:12])
-}

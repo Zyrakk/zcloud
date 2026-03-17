@@ -3,7 +3,6 @@ package api
 import (
 	"bytes"
 	"context"
-	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -59,6 +58,11 @@ func New(database *db.Database, config *Config) *API {
 		config:      config,
 		auditLogger: auditLogger,
 	}
+}
+
+// Close releases resources held by the API (e.g. auth middleware caches).
+func (a *API) Close() {
+	a.auth.Close()
 }
 
 // Router configura las rutas
@@ -195,9 +199,13 @@ func (a *API) handleRegister(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		enrollmentCode = generateEnrollmentCode()
+		enrollmentCode, err = crypto.GenerateEnrollmentCode()
+		if err != nil {
+			a.jsonError(w, "failed to generate enrollment code", http.StatusInternalServerError)
+			return
+		}
 		enrollmentExpires = time.Now().Add(10 * time.Minute)
-		if err := a.db.CreateTOTPEnrollment(hashEnrollmentCode(enrollmentCode), deviceID, userID, enrollmentExpires); err != nil {
+		if err := a.db.CreateTOTPEnrollment(crypto.HashEnrollmentCode(enrollmentCode), deviceID, userID, enrollmentExpires); err != nil {
 			a.jsonError(w, "failed to create enrollment code", http.StatusInternalServerError)
 			return
 		}
@@ -697,9 +705,13 @@ func (a *API) handleApproveDevice(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Create a one-time enrollment code for the user to retrieve the secret on their terminal.
-	enrollmentCode := generateEnrollmentCode()
+	enrollmentCode, err := crypto.GenerateEnrollmentCode()
+	if err != nil {
+		a.jsonError(w, "failed to generate enrollment code", http.StatusInternalServerError)
+		return
+	}
 	enrollmentExpires := time.Now().Add(10 * time.Minute)
-	if err := a.db.CreateTOTPEnrollment(hashEnrollmentCode(enrollmentCode), deviceID, u.ID, enrollmentExpires); err != nil {
+	if err := a.db.CreateTOTPEnrollment(crypto.HashEnrollmentCode(enrollmentCode), deviceID, u.ID, enrollmentExpires); err != nil {
 		a.jsonError(w, "failed to create enrollment code", http.StatusInternalServerError)
 		return
 	}
@@ -864,7 +876,7 @@ func (a *API) handleTOTPEnroll(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Consume enrollment code (one-time), fetch user, and optionally mark TOTP configured.
-	userID, err := a.db.ConsumeTOTPEnrollment(hashEnrollmentCode(req.EnrollmentCode), req.DeviceID)
+	userID, err := a.db.ConsumeTOTPEnrollment(crypto.HashEnrollmentCode(req.EnrollmentCode), req.DeviceID)
 	if err != nil {
 		a.jsonError(w, err.Error(), http.StatusForbidden)
 		return
@@ -928,27 +940,3 @@ func (a *API) handleTOTPEnroll(w http.ResponseWriter, r *http.Request) {
 	}, http.StatusOK)
 }
 
-func hashEnrollmentCode(code string) string {
-	sum := sha256.Sum256([]byte(strings.TrimSpace(code)))
-	return hex.EncodeToString(sum[:])
-}
-
-func generateEnrollmentCode() string {
-	// Human-friendly alphabet (no 0/O, 1/I) for manual typing.
-	const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
-	const n = 12
-
-	var b [n]byte
-	if _, err := rand.Read(b[:]); err != nil {
-		// Extremely unlikely; fallback to uuid segment (still ok).
-		return strings.ToUpper(strings.ReplaceAll(uuid.New().String()[:12], "-", ""))
-	}
-
-	out := make([]byte, n)
-	for i := 0; i < n; i++ {
-		out[i] = alphabet[int(b[i])%len(alphabet)]
-	}
-
-	// Group as XXXX-XXXX-XXXX
-	return fmt.Sprintf("%s-%s-%s", out[0:4], out[4:8], out[8:12])
-}
