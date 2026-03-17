@@ -48,13 +48,15 @@ type ServerConfig struct {
 	} `yaml:"auth"`
 
 	Kubernetes struct {
-		Kubeconfig string `yaml:"kubeconfig"`
-		CoreDNSIP  string `yaml:"coredns_ip"`
-		CACert     string `yaml:"ca_cert"`
+		Kubeconfig  string `yaml:"kubeconfig"`
+		CoreDNSIP   string `yaml:"coredns_ip"`
+		CACert      string `yaml:"ca_cert"`
+		ClusterName string `yaml:"cluster_name"`
 	} `yaml:"kubernetes"`
 
 	Storage struct {
-		Database string `yaml:"database"`
+		Database    string `yaml:"database"`
+		BaseFileDir string `yaml:"base_file_dir"`
 	} `yaml:"storage"`
 }
 
@@ -132,6 +134,8 @@ func main() {
 		KubeconfigPath:  config.Kubernetes.Kubeconfig,
 		CoreDNSIP:       config.Kubernetes.CoreDNSIP,
 		CACertPath:      config.Kubernetes.CACert,
+		ClusterName:     config.Kubernetes.ClusterName,
+		BaseFileDir:     config.Storage.BaseFileDir,
 	}
 	apiServer := api.New(database, apiConfig)
 
@@ -246,8 +250,14 @@ func loadConfig(path string) (*ServerConfig, error) {
 	if config.Storage.Database == "" {
 		config.Storage.Database = "/opt/zcloud-server/data/zcloud.db"
 	}
+	if config.Storage.BaseFileDir == "" {
+		config.Storage.BaseFileDir = "/home/zcloud/files"
+	}
 	if config.Auth.JWTSecretFile == "" {
 		config.Auth.JWTSecretFile = "/opt/zcloud-server/data/jwt.secret"
+	}
+	if config.Kubernetes.ClusterName == "" {
+		config.Kubernetes.ClusterName = "zcloud-k3s"
 	}
 
 	return &config, nil

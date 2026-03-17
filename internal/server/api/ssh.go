@@ -17,12 +17,15 @@ import (
 	"github.com/zyrak/zcloud/internal/shared/protocol"
 )
 
-var upgrader = websocket.Upgrader{
-	ReadBufferSize:  1024,
-	WriteBufferSize: 1024,
-	CheckOrigin: func(r *http.Request) bool {
-		return true // Ya validamos con JWT
-	},
+func newUpgrader() websocket.Upgrader {
+	return websocket.Upgrader{
+		ReadBufferSize:  1024,
+		WriteBufferSize: 1024,
+		CheckOrigin: func(r *http.Request) bool {
+			origin := r.Header.Get("Origin")
+			return origin == ""
+		},
+	}
 }
 
 // handleSSHShell maneja conexiones SSH interactivas vía WebSocket
@@ -31,6 +34,7 @@ func (a *API) handleSSHShell(w http.ResponseWriter, r *http.Request) {
 	log.Printf("SSH session started for device: %s", deviceID)
 
 	// Upgrade a WebSocket
+	upgrader := newUpgrader()
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		log.Printf("WebSocket upgrade failed: %v", err)
@@ -38,12 +42,22 @@ func (a *API) handleSSHShell(w http.ResponseWriter, r *http.Request) {
 	}
 	defer conn.Close()
 
+	conn.SetReadLimit(64 * 1024) // 64KB
+
 	// Crear comando shell
-	cmd := exec.Command("/bin/bash")
-	cmd.Env = append(os.Environ(),
+	shell := "/bin/bash"
+	if _, err := os.Stat(shell); err != nil {
+		shell = "/bin/sh"
+	}
+	cmd := exec.Command(shell)
+	cmd.Env = []string{
 		"TERM=xterm-256color",
+		"PATH=/usr/local/bin:/usr/bin:/bin",
+		"HOME=/home/zcloud",
+		"SHELL=" + shell,
+		"LANG=" + os.Getenv("LANG"),
 		"PS1=\\u@zcloud:\\w\\$ ",
-	)
+	}
 
 	// Iniciar PTY
 	ptmx, err := pty.Start(cmd)

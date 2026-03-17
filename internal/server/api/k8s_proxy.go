@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
+	"fmt"
 	"io"
 	"log"
 	"net"
@@ -66,6 +67,8 @@ func (a *API) handleK8sProxy(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Build the target URL for k3s API
+	// TODO: Extract server URL from kubeconfig instead of hardcoding; requires refactoring
+	// the singleton init to also store the parsed server URL.
 	k8sURL := "https://127.0.0.1:6443" + k8sPath
 	if r.URL.RawQuery != "" {
 		k8sURL += "?" + r.URL.RawQuery
@@ -163,7 +166,7 @@ func (a *API) getK8sClient() (*http.Client, string, error) {
 			k8sCACertPool = x509.NewCertPool()
 			if !k8sCACertPool.AppendCertsFromPEM(certData) {
 				log.Printf("Failed to parse CA certificate")
-				k8sConfigErr = err
+				k8sConfigErr = fmt.Errorf("failed to parse CA certificate from %s", a.config.CACertPath)
 				return
 			}
 		}

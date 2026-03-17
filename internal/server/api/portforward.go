@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"log"
 	"net"
@@ -34,6 +35,58 @@ func isK8sHostname(host string) bool {
 		}
 	}
 	return false
+}
+
+var (
+	blockedCIDRs = func() []*net.IPNet {
+		cidrs := []string{
+			"169.254.0.0/16",
+			"fe80::/10",
+			"fd00::/8",
+			"::ffff:169.254.0.0/112",
+		}
+		var nets []*net.IPNet
+		for _, c := range cidrs {
+			_, n, _ := net.ParseCIDR(c)
+			nets = append(nets, n)
+		}
+		return nets
+	}()
+
+	blockedHosts = []string{
+		"metadata.google.internal",
+		"metadata.internal",
+	}
+)
+
+func validatePortForwardTarget(host string) error {
+	if host == "" {
+		return fmt.Errorf("target host is required")
+	}
+	for _, blocked := range blockedHosts {
+		if host == blocked {
+			return fmt.Errorf("access to %s is not allowed", host)
+		}
+	}
+	if host == "localhost" || host == "127.0.0.1" || isK8sHostname(host) {
+		return nil
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return fmt.Errorf("non-k8s hostname not allowed: %s", host)
+	}
+	if ip.IsUnspecified() {
+		return fmt.Errorf("access to %s is not allowed", host)
+	}
+	if ip.IsLoopback() {
+		return fmt.Errorf("access to %s is not allowed", host)
+	}
+	for _, cidr := range blockedCIDRs {
+		if cidr.Contains(ip) {
+			return fmt.Errorf("access to %s is not allowed", host)
+		}
+	}
+	return nil
 }
 
 // resolveK8sHostname resolves a k8s service name using CoreDNS
@@ -111,15 +164,24 @@ func (a *API) handlePortForward(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Validate target host to prevent SSRF
+	if err := validatePortForwardTarget(targetHost); err != nil {
+		http.Error(w, err.Error(), http.StatusForbidden)
+		return
+	}
+
 	log.Printf("Port forward started for device %s: -> %s:%d", deviceID, targetHost, targetPort)
 
 	// Upgrade a WebSocket
+	upgrader := newUpgrader()
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		log.Printf("WebSocket upgrade failed: %v", err)
 		return
 	}
 	defer conn.Close()
+
+	conn.SetReadLimit(256 * 1024) // 256KB
 
 	// Conectar al destino usando k8s DNS si es necesario
 	ctx := r.Context()

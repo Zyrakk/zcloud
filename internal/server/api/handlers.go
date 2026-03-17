@@ -2,6 +2,7 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
@@ -40,6 +41,8 @@ type Config struct {
 	KubeconfigPath  string
 	CoreDNSIP       string
 	CACertPath      string
+	ClusterName     string
+	BaseFileDir     string
 }
 
 // New crea una nueva API
@@ -127,6 +130,7 @@ func (a *API) Router() http.Handler {
 // Handlers
 
 func (a *API) handleRegister(w http.ResponseWriter, r *http.Request) {
+	limitBody(r, maxJSONBodySize)
 	var req protocol.RegisterRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		a.jsonError(w, "invalid request body", http.StatusBadRequest)
@@ -264,6 +268,7 @@ func (a *API) handleDeviceStatus(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) handleLogin(w http.ResponseWriter, r *http.Request) {
+	limitBody(r, maxJSONBodySize)
 	var req protocol.LoginRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		a.jsonError(w, "invalid request body", http.StatusBadRequest)
@@ -379,6 +384,9 @@ func (a *API) handleLogout(w http.ResponseWriter, r *http.Request) {
 		a.auditLogger.LogAudit("logout", deviceID, fmt.Sprintf("ip=%s", logoutIP))
 	}
 
+	// Eagerly evict cached tokens for this device
+	a.auth.InvalidateDevice(deviceID)
+
 	// Eliminar sesiones del dispositivo
 	_ = a.db.DeleteDeviceSessions(deviceID)
 
@@ -389,7 +397,7 @@ func (a *API) handleClusterStatus(w http.ResponseWriter, r *http.Request) {
 	deviceID := middleware.GetDeviceID(r)
 
 	// Ejecutar kubectl get nodes
-	cmd := exec.Command("kubectl", "--kubeconfig", a.config.KubeconfigPath, "get", "nodes", "-o", "json")
+	cmd := exec.CommandContext(r.Context(), "kubectl", "--kubeconfig", a.config.KubeconfigPath, "get", "nodes", "-o", "json")
 	output, err := cmd.Output()
 	if err != nil {
 		a.jsonError(w, "failed to get cluster status", http.StatusInternalServerError)
@@ -444,15 +452,22 @@ func (a *API) handleClusterStatus(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
-	device, _ := a.db.GetDevice(deviceID)
+	device, err := a.db.GetDevice(deviceID)
+	if err != nil {
+		log.Printf("Failed to get device %s: %v", deviceID, err)
+	}
+	deviceName := ""
+	if device != nil {
+		deviceName = device.Name
+	}
 
 	resp := &protocol.StatusResponse{
 		Connected:   true,
-		ClusterName: "zcloud-k3s",
+		ClusterName: a.config.ClusterName,
 		Nodes:       nodes,
 		Session: protocol.SessionInfo{
 			DeviceID:   deviceID,
-			DeviceName: device.Name,
+			DeviceName: deviceName,
 			Valid:      true,
 		},
 	}
@@ -461,6 +476,7 @@ func (a *API) handleClusterStatus(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) handleApply(w http.ResponseWriter, r *http.Request) {
+	limitBody(r, 10<<20) // 10MB
 	var req protocol.ApplyRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		a.jsonError(w, "invalid request body", http.StatusBadRequest)
@@ -479,9 +495,11 @@ func (a *API) handleApply(w http.ResponseWriter, r *http.Request) {
 			args = append(args, "--dry-run=client")
 		}
 
-		cmd := exec.Command("kubectl", args...)
+		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Minute)
+		cmd := exec.CommandContext(ctx, "kubectl", args...)
 		cmd.Stdin = bytes.NewBufferString(manifest + "\n")
 		output, err := cmd.CombinedOutput()
+		cancel()
 
 		if err != nil {
 			results = append(results, protocol.ApplyResult{
@@ -532,6 +550,7 @@ func (a *API) handleApply(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) handleExec(w http.ResponseWriter, r *http.Request) {
+	limitBody(r, maxJSONBodySize)
 	var req protocol.ExecRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		a.jsonError(w, "invalid request body", http.StatusBadRequest)
@@ -551,7 +570,9 @@ func (a *API) handleExec(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Execute command with a controlled environment (ensure KUBECONFIG for k8s tooling).
-	cmd := exec.Command(req.Command, req.Args...)
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Minute)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, req.Command, req.Args...)
 	if req.WorkDir != "" {
 		cmd.Dir = req.WorkDir
 	}
@@ -604,6 +625,7 @@ func (a *API) handleListDevices(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) handleApproveDevice(w http.ResponseWriter, r *http.Request) {
+	limitBody(r, maxJSONBodySize)
 	deviceID := r.PathValue("id")
 	if deviceID == "" {
 		a.jsonError(w, "device id is required", http.StatusBadRequest)
@@ -719,6 +741,9 @@ func (a *API) handleRevokeDevice(w http.ResponseWriter, r *http.Request) {
 	// Revocar todos los tokens del dispositivo
 	_ = a.db.RevokeDeviceTokens(deviceID)
 
+	// Eagerly evict cached tokens for this device
+	a.auth.InvalidateDevice(deviceID)
+
 	log.Printf("Device revoked: %s (%s)", device.Name, deviceID)
 
 	// Audit log
@@ -743,7 +768,9 @@ func (a *API) handleListSessions(w http.ResponseWriter, r *http.Request) {
 func (a *API) jsonResponse(w http.ResponseWriter, data interface{}, status int) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(data)
+	if err := json.NewEncoder(w).Encode(data); err != nil {
+		log.Printf("Failed to encode JSON response: %v", err)
+	}
 }
 
 // handleHealthCheck is a simple health check endpoint
@@ -780,6 +807,12 @@ func (a *API) jsonError(w http.ResponseWriter, message string, status int) {
 	a.jsonResponse(w, protocol.ErrorResponse{Error: message}, status)
 }
 
+const maxJSONBodySize = 1 << 20 // 1MB
+
+func limitBody(r *http.Request, maxBytes int64) {
+	r.Body = http.MaxBytesReader(nil, r.Body, maxBytes)
+}
+
 func generateDeviceID(publicKey string) string {
 	hash := sha256.Sum256([]byte(publicKey))
 	return hex.EncodeToString(hash[:])[:12]
@@ -793,6 +826,7 @@ func hashToken(token string) string {
 // handleTOTPEnroll returns the TOTP secret to the user exactly once (per user),
 // after validating a one-time enrollment code and a device-key signature.
 func (a *API) handleTOTPEnroll(w http.ResponseWriter, r *http.Request) {
+	limitBody(r, maxJSONBodySize)
 	var req protocol.TOTPEnrollRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		a.jsonError(w, "invalid request body", http.StatusBadRequest)

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"mime"
 	"net/http"
 	"os"
 	"path"
@@ -18,11 +19,19 @@ import (
 )
 
 const (
-	// BaseFileDir directorio base para archivos (configurable)
-	BaseFileDir = "/home/zcloud/files"
+	// defaultBaseFileDir is the fallback directory for file operations when not configured.
+	defaultBaseFileDir = "/home/zcloud/files"
 	// MaxUploadSize tamaño máximo de subida (100MB)
 	MaxUploadSize = 100 << 20
 )
+
+// baseFileDir returns the configured base directory for file operations.
+func (a *API) baseFileDir() string {
+	if a.config.BaseFileDir != "" {
+		return a.config.BaseFileDir
+	}
+	return defaultBaseFileDir
+}
 
 // handleFileUpload procesa subidas de archivos multipart
 func (a *API) handleFileUpload(w http.ResponseWriter, r *http.Request) {
@@ -61,7 +70,8 @@ func (a *API) handleFileUpload(w http.ResponseWriter, r *http.Request) {
 	// Decide whether "path" is a directory or a file path:
 	// - If the client used a trailing slash (common UX for "upload into dir"), treat it as a directory.
 	// - If the destination already exists and is a directory, treat it as a directory.
-	destAbs := filepath.Join(BaseFileDir, safePath)
+	baseDir := a.baseFileDir()
+	destAbs := filepath.Join(baseDir, safePath)
 	destIsDir := safePath == "" || strings.HasSuffix(destPath, "/") || strings.HasSuffix(destPath, "\\")
 	if !destIsDir {
 		if info, err := os.Stat(destAbs); err == nil && info.IsDir() {
@@ -87,9 +97,9 @@ func (a *API) handleFileUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Safety check: ensure the final target stays within BaseFileDir (defense-in-depth).
+	// Safety check: ensure the final target stays within baseDir (defense-in-depth).
 	cleanFullPath := filepath.Clean(fullPath)
-	rel, err := filepath.Rel(BaseFileDir, cleanFullPath)
+	rel, err := filepath.Rel(baseDir, cleanFullPath)
 	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 		a.jsonError(w, "invalid path", http.StatusBadRequest)
 		return
@@ -150,7 +160,7 @@ func (a *API) handleFileDownload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	fullPath, err := resolvePathForRead(BaseFileDir, safePath)
+	fullPath, err := resolvePathForRead(a.baseFileDir(), safePath)
 	if err != nil {
 		if os.IsNotExist(err) {
 			a.jsonError(w, "file not found", http.StatusNotFound)
@@ -185,7 +195,9 @@ func (a *API) handleFileDownload(w http.ResponseWriter, r *http.Request) {
 	defer file.Close()
 
 	// Configurar headers
-	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s\"", filepath.Base(fullPath)))
+	w.Header().Set("Content-Disposition", mime.FormatMediaType("attachment", map[string]string{
+		"filename": filepath.Base(fullPath),
+	}))
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set("Content-Length", fmt.Sprintf("%d", info.Size()))
 
@@ -214,7 +226,7 @@ func (a *API) handleFileList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	fullPath, err := resolvePathForRead(BaseFileDir, safePath)
+	fullPath, err := resolvePathForRead(a.baseFileDir(), safePath)
 	if err != nil {
 		if os.IsNotExist(err) {
 			a.jsonError(w, "path not found", http.StatusNotFound)
@@ -300,6 +312,7 @@ func (a *API) handleFileList(w http.ResponseWriter, r *http.Request) {
 
 // handleFileDelete elimina un archivo o directorio
 func (a *API) handleFileDelete(w http.ResponseWriter, r *http.Request) {
+	limitBody(r, maxJSONBodySize)
 	deviceID := middleware.GetDeviceID(r)
 
 	var req struct {
@@ -324,8 +337,8 @@ func (a *API) handleFileDelete(w http.ResponseWriter, r *http.Request) {
 
 	// For deletion we do not resolve symlinks: removing a symlink removes the link itself (not the target),
 	// and removing a directory tree does not follow symlinks. We still ensure the requested path is within
-	// BaseFileDir to prevent traversal.
-	fullPath, err := resolvePathForDelete(BaseFileDir, safePath)
+	// the base file directory to prevent traversal.
+	fullPath, err := resolvePathForDelete(a.baseFileDir(), safePath)
 	if err != nil {
 		a.jsonError(w, "invalid path", http.StatusBadRequest)
 		return

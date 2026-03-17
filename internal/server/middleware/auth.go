@@ -107,6 +107,17 @@ func (m *AuthMiddleware) InvalidateToken(tokenString string) {
 	m.tokenCacheMu.Unlock()
 }
 
+// InvalidateDevice removes all cached tokens for a given device from the cache.
+func (m *AuthMiddleware) InvalidateDevice(deviceID string) {
+	m.tokenCacheMu.Lock()
+	defer m.tokenCacheMu.Unlock()
+	for k, v := range m.tokenCache {
+		if v.claims.DeviceID == deviceID {
+			delete(m.tokenCache, k)
+		}
+	}
+}
+
 // GenerateToken genera un nuevo JWT
 func (m *AuthMiddleware) GenerateToken(deviceID, deviceName string, isAdmin bool, duration time.Duration) (string, time.Time, error) {
 	expiresAt := time.Now().Add(duration)
