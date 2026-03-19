@@ -11,9 +11,6 @@ dist/
 # Output
 *.out
 
-# Go
-go.sum
-
 # IDE
 .idea/
 .vscode/
