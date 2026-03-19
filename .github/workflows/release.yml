@@ -1,0 +1,43 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+
+      - name: Run tests
+        run: go test ./...
+
+      - name: Build binaries
+        run: make build VERSION=${{ github.ref_name }}
+
+      - name: Generate checksums
+        working-directory: dist
+        run: sha256sum zcloud-linux-amd64 zcloud-linux-arm64 zcloud-server-linux-amd64 zcloud-server-linux-arm64 > checksums-sha256.txt
+
+      - name: Create draft release
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          name: ZCloud ${{ github.ref_name }}
+          files: |
+            dist/zcloud-linux-amd64
+            dist/zcloud-linux-arm64
+            dist/zcloud-server-linux-amd64
+            dist/zcloud-server-linux-arm64
+            dist/checksums-sha256.txt
