@@ -149,6 +149,9 @@ func main() {
 		// The k8s proxy handler manages timeouts per-request for non-streaming requests
 		WriteTimeout: 0,
 		IdleTimeout:  120 * time.Second,
+		// Disable HTTP/2: SPDY/WebSocket upgrades (kubectl exec, port-forward) require
+		// HTTP/1.1 Connection/Upgrade headers, which HTTP/2 prohibits and strips.
+		TLSNextProto: make(map[string]func(*http.Server, *tls.Conn, http.Handler)),
 	}
 
 	// TLS si está configurado
