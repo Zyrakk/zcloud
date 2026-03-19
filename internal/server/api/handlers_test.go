@@ -2,12 +2,16 @@ package api
 
 import "testing"
 
-func TestGenerateDeviceID(t *testing.T) {
-	id := generateDeviceID("test-public-key")
-	if len(id) != 12 {
-		t.Errorf("expected 12-char ID, got %d: %s", len(id), id)
+func TestHashToken(t *testing.T) {
+	h1 := hashToken("test-token")
+	h2 := hashToken("test-token")
+	if h1 != h2 {
+		t.Error("hashToken not deterministic")
 	}
-	if id2 := generateDeviceID("test-public-key"); id != id2 {
-		t.Error("generateDeviceID not deterministic")
+	if len(h1) != 64 {
+		t.Errorf("expected 64-char hex hash, got %d: %s", len(h1), h1)
+	}
+	if h1 == hashToken("different-token") {
+		t.Error("different inputs produced same hash")
 	}
 }

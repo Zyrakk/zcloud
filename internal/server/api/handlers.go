@@ -42,6 +42,7 @@ type Config struct {
 	CACertPath      string
 	ClusterName     string
 	BaseFileDir     string
+	CORSOrigin      string
 }
 
 // New crea una nueva API
@@ -126,7 +127,7 @@ func (a *API) Router() http.Handler {
 
 	// Aplicar middleware global (Logger, Security Headers, CORS)
 	// Nota: el rate limiter ya se aplicó selectivamente arriba
-	handler := middleware.Logger(middleware.SecurityHeaders(middleware.CORS(mux)))
+	handler := middleware.Logger(middleware.SecurityHeaders(middleware.CORSWithOrigin(a.config.CORSOrigin)(mux)))
 
 	return handler
 }
@@ -165,7 +166,7 @@ func (a *API) handleRegister(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Generar ID único
-	deviceID := generateDeviceID(req.PublicKey)
+	deviceID := crypto.GenerateDeviceID(req.PublicKey)
 
 	// Estado inicial
 	status := protocol.DeviceStatusApproved
@@ -834,11 +835,6 @@ const maxJSONBodySize = 1 << 20 // 1MB
 
 func limitBody(r *http.Request, maxBytes int64) {
 	r.Body = http.MaxBytesReader(nil, r.Body, maxBytes)
-}
-
-func generateDeviceID(publicKey string) string {
-	hash := sha256.Sum256([]byte(publicKey))
-	return hex.EncodeToString(hash[:])[:12]
 }
 
 func hashToken(token string) string {

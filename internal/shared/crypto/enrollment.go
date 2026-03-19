@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"fmt"
+	"strings"
 )
 
 const enrollmentAlphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
@@ -22,6 +23,6 @@ func GenerateEnrollmentCode() (string, error) {
 }
 
 func HashEnrollmentCode(code string) string {
-	h := sha256.Sum256([]byte(code))
+	h := sha256.Sum256([]byte(strings.TrimSpace(code)))
 	return fmt.Sprintf("%x", h)
 }

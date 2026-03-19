@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
@@ -47,6 +48,7 @@ type AuthMiddleware struct {
 	tokenCacheMu sync.RWMutex
 	cacheTTL     time.Duration
 	done         chan struct{}
+	closeOnce    sync.Once
 }
 
 // NewAuthMiddleware crea un nuevo middleware de autenticación
@@ -65,9 +67,9 @@ func NewAuthMiddleware(jwtSecret string) *AuthMiddleware {
 	return m
 }
 
-// Close stops the background cleanup goroutine.
+// Close stops the background cleanup goroutine. Safe to call multiple times.
 func (m *AuthMiddleware) Close() {
-	close(m.done)
+	m.closeOnce.Do(func() { close(m.done) })
 }
 
 // cleanupExpiredCache periodically removes expired entries from the token cache
@@ -254,10 +256,11 @@ func GetIsAdmin(r *http.Request) bool {
 
 // RateLimiter middleware simple de rate limiting
 type RateLimiter struct {
-	requests map[string][]time.Time
-	limit    int
-	window   time.Duration
-	mu       sync.RWMutex
+	requests   map[string][]time.Time
+	limit      int
+	window     time.Duration
+	mu         sync.RWMutex
+	cleaning   atomic.Bool
 }
 
 // NewRateLimiter crea un nuevo rate limiter
@@ -299,9 +302,13 @@ func (rl *RateLimiter) Limit(next http.Handler) http.Handler {
 		// Registrar request
 		rl.requests[ip] = append(rl.requests[ip], now)
 
-		// Trigger cleanup when map grows large to prevent unbounded memory growth
-		if len(rl.requests) > 10000 {
-			go rl.cleanup()
+		// Trigger cleanup when map grows large to prevent unbounded memory growth.
+		// Use atomic flag to ensure at most one cleanup goroutine runs at a time.
+		if len(rl.requests) > 10000 && rl.cleaning.CompareAndSwap(false, true) {
+			go func() {
+				defer rl.cleaning.Store(false)
+				rl.cleanup()
+			}()
 		}
 
 		rl.mu.Unlock()

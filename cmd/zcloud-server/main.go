@@ -134,6 +134,7 @@ func main() {
 		CACertPath:      config.Kubernetes.CACert,
 		ClusterName:     config.Kubernetes.ClusterName,
 		BaseFileDir:     config.Storage.BaseFileDir,
+		CORSOrigin:      config.Server.Domain,
 	}
 	apiServer := api.New(database, apiConfig)
 
