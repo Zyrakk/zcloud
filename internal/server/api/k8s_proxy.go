@@ -74,6 +74,13 @@ func (a *API) handleK8sProxy(w http.ResponseWriter, r *http.Request) {
 		k8sURL += "?" + r.URL.RawQuery
 	}
 
+	// Protocol upgrades (SPDY/WebSocket) for kubectl exec, port-forward, etc.
+	// Must be checked before streaming — upgrade requests use raw TCP tunneling.
+	if isUpgradeRequest(r) {
+		a.handleK8sUpgradeProxy(w, r, k8sURL)
+		return
+	}
+
 	// Check if this is a streaming request (requires flushing + no timeout)
 	isStream := isStreamingRequest(r)
 
@@ -92,9 +99,10 @@ func (a *API) handleK8sProxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Copy relevant headers from original request
+	// Copy relevant headers from original request.
+	// Hop-by-hop headers (Connection, Upgrade, etc.) are stripped for normal requests;
+	// upgrade requests are handled by handleK8sUpgradeProxy above which forwards them.
 	for key, values := range r.Header {
-		// Skip hop-by-hop headers
 		if key == "Connection" || key == "Keep-Alive" || key == "Proxy-Authenticate" ||
 			key == "Proxy-Authorization" || key == "Te" || key == "Trailers" ||
 			key == "Transfer-Encoding" || key == "Upgrade" {
@@ -321,6 +329,37 @@ func (a *API) getK8sClient() (*http.Client, string, error) {
 	return k8sHTTPClient, k8sBearerToken, nil
 }
 
+// getK8sTLSConfig returns a TLS config suitable for raw dialing to the k8s API.
+// It triggers the sync.Once initialization via getK8sClient, then assembles a
+// tls.Config from the cached globals — no duplication of kubeconfig parsing.
+func (a *API) getK8sTLSConfig() (*tls.Config, error) {
+	// Ensure the singleton init has run so cached TLS vars are populated.
+	if _, _, err := a.getK8sClient(); err != nil {
+		return nil, err
+	}
+
+	tlsCfg := &tls.Config{
+		InsecureSkipVerify: false,
+	}
+	if k8sCACertPool != nil {
+		tlsCfg.RootCAs = k8sCACertPool
+	}
+	if k8sHasClientCert {
+		tlsCfg.Certificates = []tls.Certificate{k8sClientCert}
+	}
+	return tlsCfg, nil
+}
+
+// isUpgradeRequest returns true if the request is a protocol upgrade (SPDY, WebSocket, etc.).
+func isUpgradeRequest(r *http.Request) bool {
+	// Connection header must contain "upgrade" (case-insensitive) and Upgrade header must be set.
+	conn := r.Header.Get("Connection")
+	if !strings.Contains(strings.ToLower(conn), "upgrade") {
+		return false
+	}
+	return r.Header.Get("Upgrade") != ""
+}
+
 // isStreamingRequest checks if the request should be treated as a long-lived stream.
 func isStreamingRequest(r *http.Request) bool {
 	q := r.URL.Query()
@@ -332,6 +371,129 @@ func isStreamingRequest(r *http.Request) bool {
 		return true
 	}
 	return false
+}
+
+// handleK8sUpgradeProxy handles SPDY/WebSocket upgrade requests by raw TCP tunneling.
+// Standard httputil.ReverseProxy strips hop-by-hop headers (Connection, Upgrade),
+// which breaks kubectl exec/port-forward. Instead we hijack both ends and relay bytes.
+func (a *API) handleK8sUpgradeProxy(w http.ResponseWriter, r *http.Request, k8sURL string) {
+	upgradeProto := r.Header.Get("Upgrade")
+	log.Printf("K8s upgrade proxy: %s %s (protocol: %s)", r.Method, k8sURL, upgradeProto)
+
+	tlsCfg, err := a.getK8sTLSConfig()
+	if err != nil {
+		http.Error(w, "failed to get k8s TLS config: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// Dial the k8s API server over TLS (HTTP/1.1 — upgrades require it).
+	backendConn, err := tls.Dial("tcp", "127.0.0.1:6443", tlsCfg)
+	if err != nil {
+		http.Error(w, "failed to connect to k8s API: "+err.Error(), http.StatusBadGateway)
+		return
+	}
+	defer backendConn.Close()
+
+	// Build the raw HTTP request to send over the TLS connection.
+	// We need the path + query from k8sURL.
+	reqURL := k8sURL[len("https://127.0.0.1:6443"):] // strip scheme+host
+	var reqBuf strings.Builder
+	reqBuf.WriteString(fmt.Sprintf("%s %s HTTP/1.1\r\n", r.Method, reqURL))
+	reqBuf.WriteString("Host: 127.0.0.1:6443\r\n")
+
+	// Copy all original headers, replacing Authorization with k8s credentials.
+	for key, values := range r.Header {
+		if strings.EqualFold(key, "Authorization") {
+			continue // replaced below with k8s auth
+		}
+		for _, v := range values {
+			reqBuf.WriteString(fmt.Sprintf("%s: %s\r\n", key, v))
+		}
+	}
+
+	// Add k8s authentication.
+	if k8sBearerToken != "" {
+		reqBuf.WriteString("Authorization: Bearer " + k8sBearerToken + "\r\n")
+	}
+
+	reqBuf.WriteString("\r\n") // end of headers
+
+	if _, err := backendConn.Write([]byte(reqBuf.String())); err != nil {
+		http.Error(w, "failed to write to k8s API: "+err.Error(), http.StatusBadGateway)
+		return
+	}
+
+	// Hijack the client connection.
+	hijacker, ok := w.(http.Hijacker)
+	if !ok {
+		http.Error(w, "hijacking not supported", http.StatusInternalServerError)
+		return
+	}
+	clientConn, clientBuf, err := hijacker.Hijack()
+	if err != nil {
+		http.Error(w, "hijack failed: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	defer clientConn.Close()
+
+	// Read the response from k8s until end-of-headers and forward to client.
+	// We read byte-by-byte to find the \r\n\r\n boundary without over-reading.
+	var responseBuf []byte
+	var headersDone bool
+	oneByte := make([]byte, 1)
+	for !headersDone {
+		n, err := backendConn.Read(oneByte)
+		if err != nil {
+			clientConn.Write([]byte("HTTP/1.1 502 Bad Gateway\r\n\r\n"))
+			return
+		}
+		if n > 0 {
+			responseBuf = append(responseBuf, oneByte[0])
+			if len(responseBuf) >= 4 &&
+				responseBuf[len(responseBuf)-4] == '\r' &&
+				responseBuf[len(responseBuf)-3] == '\n' &&
+				responseBuf[len(responseBuf)-2] == '\r' &&
+				responseBuf[len(responseBuf)-1] == '\n' {
+				headersDone = true
+			}
+		}
+	}
+
+	// Forward the raw response headers (including 101 Switching Protocols) to the client.
+	if _, err := clientConn.Write(responseBuf); err != nil {
+		return
+	}
+
+	// Flush any buffered data from the client that arrived after the HTTP headers
+	// but before hijack (critical for SPDY which may send frames immediately).
+	if clientBuf.Reader.Buffered() > 0 {
+		buffered := make([]byte, clientBuf.Reader.Buffered())
+		n, _ := clientBuf.Read(buffered)
+		if n > 0 {
+			backendConn.Write(buffered[:n])
+		}
+	}
+
+	// Bidirectional copy — no deadlines, tunnel stays open until either side closes.
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		io.Copy(backendConn, clientConn)
+		// Half-close: signal backend that client is done writing.
+		backendConn.CloseWrite()
+	}()
+	go func() {
+		defer wg.Done()
+		io.Copy(clientConn, backendConn)
+		// Half-close: signal client that backend is done writing.
+		if tc, ok := clientConn.(*net.TCPConn); ok {
+			tc.CloseWrite()
+		}
+	}()
+	wg.Wait()
+
+	log.Printf("K8s upgrade proxy ended: %s %s", r.Method, reqURL)
 }
 
 // flushingCopy copies data from src to dst, flushing after each chunk
