@@ -277,18 +277,18 @@ binary or migrating a database.
 
 ### Publishing a release
 
-Releases are published by GitHub Actions. After merging the changes for a
-version, create and push a semantic-version tag:
+Releases are published by GitHub Actions. Update `VERSION` and
+`RELEASE_NOTES.md`, then create and push a semantic-version tag:
 
 ```bash
-git tag v2.3.0
-git push origin v2.3.0
+git tag v2.3.1
+git push origin v2.3.1
 ```
 
 The release workflow runs the tests, builds the client and server for `amd64`
-and `arm64`, creates `checksums-sha256.txt`, uploads all artifacts, and
-generates the release notes from commits and pull requests. Do not build or
-upload release files manually.
+and `arm64`, creates `checksums-sha256.txt`, uploads all artifacts, and uses
+`RELEASE_NOTES.md` as the release description. Do not build or upload release
+files manually.
 
 ## Development and tests
 
