@@ -125,6 +125,12 @@ func (a *API) Router() http.Handler {
 	mux.HandleFunc("GET /health", a.handleHealthCheck)
 	mux.HandleFunc("GET /ready", a.handleReadyCheck)
 
+	// Public bootstrap scripts. They are embedded in the server binary so the
+	// documented curl installer works even when no reverse proxy serves files.
+	mux.Handle("GET /install.sh", serveInstallScript(installClientScript))
+	mux.Handle("GET /install-client.sh", serveInstallScript(installClientScript))
+	mux.Handle("GET /install-server.sh", serveInstallScript(installServerScript))
+
 	// Aplicar middleware global (Logger, Security Headers, CORS)
 	// Nota: el rate limiter ya se aplicó selectivamente arriba
 	handler := middleware.Logger(middleware.SecurityHeaders(middleware.CORSWithOrigin(a.config.CORSOrigin)(mux)))
@@ -952,4 +958,3 @@ func (a *API) handleTOTPEnroll(w http.ResponseWriter, r *http.Request) {
 		TOTPURL:    totpURL,
 	}, http.StatusOK)
 }
-

@@ -50,10 +50,14 @@ func (a *API) handleSSHShell(w http.ResponseWriter, r *http.Request) {
 		shell = "/bin/sh"
 	}
 	cmd := exec.Command(shell)
+	homeDir, err := os.UserHomeDir()
+	if err != nil || homeDir == "" {
+		homeDir = os.TempDir()
+	}
 	cmd.Env = []string{
 		"TERM=xterm-256color",
 		"PATH=/usr/local/bin:/usr/bin:/bin",
-		"HOME=/home/zcloud",
+		"HOME=" + homeDir,
 		"SHELL=" + shell,
 		"LANG=" + os.Getenv("LANG"),
 		"PS1=\\u@zcloud:\\w\\$ ",

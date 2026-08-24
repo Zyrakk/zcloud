@@ -10,7 +10,9 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -26,35 +28,103 @@ var (
 	k8sClientCert    tls.Certificate
 	k8sHasClientCert bool
 	k8sBearerToken   string
+	k8sServerURL     string
 	k8sHTTPClient    *http.Client // Singleton HTTP client with connection pooling
 )
 
-// kubeconfigFile represents the structure of a kubeconfig file
+// kubeconfigFile represents the subset of kubeconfig needed by the proxy.
+type kubeconfigCluster struct {
+	Name    string `yaml:"name"`
+	Cluster struct {
+		Server                   string `yaml:"server"`
+		CertificateAuthority     string `yaml:"certificate-authority"`
+		CertificateAuthorityData string `yaml:"certificate-authority-data"`
+		InsecureSkipTLSVerify    bool   `yaml:"insecure-skip-tls-verify"`
+	} `yaml:"cluster"`
+}
+
+type kubeconfigUser struct {
+	Name string `yaml:"name"`
+	User struct {
+		ClientCertificate     string `yaml:"client-certificate"`
+		ClientCertificateData string `yaml:"client-certificate-data"`
+		ClientKey             string `yaml:"client-key"`
+		ClientKeyData         string `yaml:"client-key-data"`
+		Token                 string `yaml:"token"`
+	} `yaml:"user"`
+}
+
+type kubeconfigContext struct {
+	Name    string `yaml:"name"`
+	Context struct {
+		Cluster string `yaml:"cluster"`
+		User    string `yaml:"user"`
+	} `yaml:"context"`
+}
+
 type kubeconfigFile struct {
-	Clusters []struct {
-		Name    string `yaml:"name"`
-		Cluster struct {
-			Server                   string `yaml:"server"`
-			CertificateAuthorityData string `yaml:"certificate-authority-data"`
-			InsecureSkipTLSVerify    bool   `yaml:"insecure-skip-tls-verify"`
-		} `yaml:"cluster"`
-	} `yaml:"clusters"`
-	Users []struct {
-		Name string `yaml:"name"`
-		User struct {
-			ClientCertificateData string `yaml:"client-certificate-data"`
-			ClientKeyData         string `yaml:"client-key-data"`
-			Token                 string `yaml:"token"`
-		} `yaml:"user"`
-	} `yaml:"users"`
-	Contexts []struct {
-		Name    string `yaml:"name"`
-		Context struct {
-			Cluster string `yaml:"cluster"`
-			User    string `yaml:"user"`
-		} `yaml:"context"`
-	} `yaml:"contexts"`
-	CurrentContext string `yaml:"current-context"`
+	Clusters       []kubeconfigCluster `yaml:"clusters"`
+	Users          []kubeconfigUser    `yaml:"users"`
+	Contexts       []kubeconfigContext `yaml:"contexts"`
+	CurrentContext string              `yaml:"current-context"`
+}
+
+func activeKubeconfigEntries(config *kubeconfigFile) (*kubeconfigCluster, *kubeconfigUser, error) {
+	var context *kubeconfigContext
+	for i := range config.Contexts {
+		if config.Contexts[i].Name == config.CurrentContext {
+			context = &config.Contexts[i]
+			break
+		}
+	}
+	if context == nil || context.Context.User == "" || context.Context.Cluster == "" {
+		return nil, nil, fmt.Errorf("current context %q is missing a user or cluster", config.CurrentContext)
+	}
+
+	var cluster *kubeconfigCluster
+	for i := range config.Clusters {
+		if config.Clusters[i].Name == context.Context.Cluster {
+			cluster = &config.Clusters[i]
+			break
+		}
+	}
+	if cluster == nil || cluster.Cluster.Server == "" {
+		return nil, nil, fmt.Errorf("cluster %q is missing a server URL", context.Context.Cluster)
+	}
+
+	var user *kubeconfigUser
+	for i := range config.Users {
+		if config.Users[i].Name == context.Context.User {
+			user = &config.Users[i]
+			break
+		}
+	}
+	if user == nil {
+		return nil, nil, fmt.Errorf("user %q was not found", context.Context.User)
+	}
+
+	return cluster, user, nil
+}
+
+func decodeOrReadKubeconfigData(inlineData, filePath, baseDir string) ([]byte, error) {
+	if inlineData != "" {
+		data, err := base64.StdEncoding.DecodeString(inlineData)
+		if err != nil {
+			return nil, fmt.Errorf("invalid base64 data: %w", err)
+		}
+		return data, nil
+	}
+	if filePath == "" {
+		return nil, nil
+	}
+	if !filepath.IsAbs(filePath) {
+		filePath = filepath.Join(baseDir, filePath)
+	}
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read %s: %w", filePath, err)
+	}
+	return data, nil
 }
 
 // handleK8sProxy proxies requests to the local Kubernetes API
@@ -66,10 +136,12 @@ func (a *API) handleK8sProxy(w http.ResponseWriter, r *http.Request) {
 		k8sPath = "/"
 	}
 
-	// Build the target URL for k3s API
-	// TODO: Extract server URL from kubeconfig instead of hardcoding; requires refactoring
-	// the singleton init to also store the parsed server URL.
-	k8sURL := "https://127.0.0.1:6443" + k8sPath
+	// Initialize credentials and the API endpoint from the active kubeconfig.
+	if _, _, err := a.getK8sClient(); err != nil {
+		http.Error(w, "failed to create k8s client: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	k8sURL := strings.TrimRight(k8sServerURL, "/") + k8sPath
 	if r.URL.RawQuery != "" {
 		k8sURL += "?" + r.URL.RawQuery
 	}
@@ -185,6 +257,15 @@ func (a *API) getK8sClient() (*http.Client, string, error) {
 			// Running in-cluster - use service account token.
 			k8sBearerToken = strings.TrimSpace(string(tokenBytes))
 			k8sHasClientCert = false
+			serviceHost := os.Getenv("KUBERNETES_SERVICE_HOST")
+			if serviceHost == "" {
+				serviceHost = "kubernetes.default.svc"
+			}
+			servicePort := os.Getenv("KUBERNETES_SERVICE_PORT_HTTPS")
+			if servicePort == "" {
+				servicePort = "443"
+			}
+			k8sServerURL = "https://" + net.JoinHostPort(serviceHost, servicePort)
 
 			// If no CA was specified, use the in-cluster service account CA if present.
 			if k8sCACertPool == nil {
@@ -215,70 +296,83 @@ func (a *API) getK8sClient() (*http.Client, string, error) {
 				return
 			}
 
-			// Find current context's user
-			var currentUser string
-			for _, ctx := range kubeconfig.Contexts {
-				if ctx.Name == kubeconfig.CurrentContext {
-					currentUser = ctx.Context.User
-					break
+			activeCluster, activeUser, err := activeKubeconfigEntries(&kubeconfig)
+			if err != nil {
+				k8sConfigErr = err
+				return
+			}
+			if activeCluster.Cluster.InsecureSkipTLSVerify {
+				k8sConfigErr = fmt.Errorf("cluster %q disables Kubernetes TLS verification", activeCluster.Name)
+				return
+			}
+			parsedServer, err := url.Parse(activeCluster.Cluster.Server)
+			if err != nil || parsedServer.Scheme != "https" || parsedServer.Host == "" {
+				k8sConfigErr = fmt.Errorf("invalid Kubernetes server URL %q", activeCluster.Cluster.Server)
+				return
+			}
+			k8sServerURL = strings.TrimRight(parsedServer.String(), "/")
+
+			kubeconfigDir := filepath.Dir(kubeconfigPath)
+			if k8sCACertPool == nil {
+				caData, err := decodeOrReadKubeconfigData(
+					activeCluster.Cluster.CertificateAuthorityData,
+					activeCluster.Cluster.CertificateAuthority,
+					kubeconfigDir,
+				)
+				if err != nil {
+					k8sConfigErr = fmt.Errorf("failed to load Kubernetes CA: %w", err)
+					return
+				}
+				if len(caData) > 0 {
+					caPool := x509.NewCertPool()
+					if !caPool.AppendCertsFromPEM(caData) {
+						k8sConfigErr = fmt.Errorf("failed to parse Kubernetes CA for cluster %q", activeCluster.Name)
+						return
+					}
+					k8sCACertPool = caPool
 				}
 			}
 
-			// Find user credentials
-			for _, user := range kubeconfig.Users {
-				if user.Name == currentUser {
-					// Check if user has token (some kubeconfigs use token auth)
-					if user.User.Token != "" {
-						k8sBearerToken = strings.TrimSpace(user.User.Token)
-						k8sHasClientCert = false
-						break
-					}
-
-					// Use client certificate authentication (k3s default)
-					if user.User.ClientCertificateData != "" && user.User.ClientKeyData != "" {
-						certData, err := base64.StdEncoding.DecodeString(user.User.ClientCertificateData)
-						if err != nil {
-							k8sConfigErr = err
-							return
-						}
-
-						keyData, err := base64.StdEncoding.DecodeString(user.User.ClientKeyData)
-						if err != nil {
-							k8sConfigErr = err
-							return
-						}
-
-						cert, err := tls.X509KeyPair(certData, keyData)
-						if err != nil {
-							k8sConfigErr = err
-							return
-						}
-
-						k8sClientCert = cert
-						k8sHasClientCert = true
-
-						// Try to load CA from kubeconfig if not specified in server config
-						if k8sCACertPool == nil {
-							for _, cluster := range kubeconfig.Clusters {
-								if cluster.Cluster.CertificateAuthorityData != "" {
-									caData, err := base64.StdEncoding.DecodeString(cluster.Cluster.CertificateAuthorityData)
-									if err == nil {
-										caPool := x509.NewCertPool()
-										if caPool.AppendCertsFromPEM(caData) {
-											k8sCACertPool = caPool
-											break
-										}
-									}
-								}
-							}
-						}
-						break
-					}
+			if activeUser.User.Token != "" {
+				k8sBearerToken = strings.TrimSpace(activeUser.User.Token)
+				k8sHasClientCert = false
+			} else {
+				certData, certErr := decodeOrReadKubeconfigData(
+					activeUser.User.ClientCertificateData,
+					activeUser.User.ClientCertificate,
+					kubeconfigDir,
+				)
+				keyData, keyErr := decodeOrReadKubeconfigData(
+					activeUser.User.ClientKeyData,
+					activeUser.User.ClientKey,
+					kubeconfigDir,
+				)
+				if certErr != nil || keyErr != nil {
+					k8sConfigErr = fmt.Errorf("failed to load credentials for user %q: cert=%v key=%v", activeUser.Name, certErr, keyErr)
+					return
 				}
+				if len(certData) == 0 || len(keyData) == 0 {
+					k8sConfigErr = fmt.Errorf("user %q has no supported token or client certificate credentials", activeUser.Name)
+					return
+				}
+				cert, err := tls.X509KeyPair(certData, keyData)
+				if err != nil {
+					k8sConfigErr = fmt.Errorf("failed to parse credentials for user %q: %w", activeUser.Name, err)
+					return
+				}
+				k8sClientCert = cert
+				k8sHasClientCert = true
+			}
+			if strings.TrimSpace(k8sBearerToken) == "" && !k8sHasClientCert {
+				k8sConfigErr = fmt.Errorf("user %q has empty Kubernetes credentials", activeUser.Name)
+				return
 			}
 		}
 
-		if k8sConfigErr != nil {
+		if k8sConfigErr != nil || k8sServerURL == "" {
+			if k8sConfigErr == nil {
+				k8sConfigErr = fmt.Errorf("Kubernetes API server URL is not configured")
+			}
 			return
 		}
 
@@ -386,8 +480,19 @@ func (a *API) handleK8sUpgradeProxy(w http.ResponseWriter, r *http.Request, k8sU
 		return
 	}
 
-	// Dial the k8s API server over TLS (HTTP/1.1 — upgrades require it).
-	backendConn, err := tls.Dial("tcp", "127.0.0.1:6443", tlsCfg)
+	backendURL, err := url.Parse(k8sServerURL)
+	if err != nil || backendURL.Scheme != "https" || backendURL.Host == "" {
+		http.Error(w, "Kubernetes server URL must use HTTPS for upgrades", http.StatusInternalServerError)
+		return
+	}
+	backendPort := backendURL.Port()
+	if backendPort == "" {
+		backendPort = "443"
+	}
+	backendAddress := net.JoinHostPort(backendURL.Hostname(), backendPort)
+
+	// Dial the configured Kubernetes API server over TLS (HTTP/1.1 — upgrades require it).
+	backendConn, err := tls.Dial("tcp", backendAddress, tlsCfg)
 	if err != nil {
 		http.Error(w, "failed to connect to k8s API: "+err.Error(), http.StatusBadGateway)
 		return
@@ -396,10 +501,15 @@ func (a *API) handleK8sUpgradeProxy(w http.ResponseWriter, r *http.Request, k8sU
 
 	// Build the raw HTTP request to send over the TLS connection.
 	// We need the path + query from k8sURL.
-	reqURL := k8sURL[len("https://127.0.0.1:6443"):] // strip scheme+host
+	requestURL, err := url.Parse(k8sURL)
+	if err != nil {
+		http.Error(w, "failed to parse Kubernetes request URL: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	reqURL := requestURL.RequestURI()
 	var reqBuf strings.Builder
 	reqBuf.WriteString(fmt.Sprintf("%s %s HTTP/1.1\r\n", r.Method, reqURL))
-	reqBuf.WriteString("Host: 127.0.0.1:6443\r\n")
+	reqBuf.WriteString("Host: " + backendURL.Host + "\r\n")
 
 	// Copy all original headers, replacing Authorization with k8s credentials.
 	for key, values := range r.Header {

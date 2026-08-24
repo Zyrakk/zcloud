@@ -229,6 +229,7 @@ func loadConfig(path string) (*ServerConfig, error) {
 	if err := yaml.Unmarshal(data, &config); err != nil {
 		return nil, fmt.Errorf("failed to parse config: %w", err)
 	}
+	baseDir := filepath.Dir(path)
 
 	// Valores por defecto
 	if config.Server.Host == "" {
@@ -244,7 +245,7 @@ func loadConfig(path string) (*ServerConfig, error) {
 		config.Auth.TOTPIssuer = "ZCloud"
 	}
 	if config.Kubernetes.Kubeconfig == "" {
-		config.Kubernetes.Kubeconfig = "/etc/rancher/k3s/k3s.yaml"
+		config.Kubernetes.Kubeconfig = "/etc/kubernetes/admin.conf"
 	}
 	if config.Kubernetes.CoreDNSIP == "" {
 		config.Kubernetes.CoreDNSIP = "10.43.0.10:53"
@@ -265,16 +266,16 @@ func loadConfig(path string) (*ServerConfig, error) {
 		}
 	}
 	if config.Storage.Database == "" {
-		config.Storage.Database = "/opt/zcloud-server/data/zcloud.db"
+		config.Storage.Database = filepath.Join(baseDir, "data", "zcloud.db")
 	}
 	if config.Storage.BaseFileDir == "" {
-		config.Storage.BaseFileDir = "/home/zcloud/files"
+		config.Storage.BaseFileDir = filepath.Join(baseDir, "files")
 	}
 	if config.Auth.JWTSecretFile == "" {
-		config.Auth.JWTSecretFile = "/opt/zcloud-server/data/jwt.secret"
+		config.Auth.JWTSecretFile = filepath.Join(baseDir, "data", "jwt.secret")
 	}
 	if config.Kubernetes.ClusterName == "" {
-		config.Kubernetes.ClusterName = "zcloud-k3s"
+		config.Kubernetes.ClusterName = "zcloud-cluster"
 	}
 
 	return &config, nil
@@ -388,11 +389,14 @@ func loadOrCreateJWTSecret(path string) (string, error) {
 func initServer(configPath string) error {
 	fmt.Println("🔧 Initializing zcloud-server...")
 
-	// Paths are hardcoded here because initServer runs via --init before any config
-	// file exists. These defaults match the default config template written below.
+	// Derive defaults from the configuration path so the server can be installed
+	// outside /opt without leaving secrets and the database behind there.
+	baseDir := filepath.Dir(configPath)
+	dataDir := filepath.Join(baseDir, "data")
+	certDir := filepath.Join(baseDir, "certs")
 	dirs := []string{
-		"/opt/zcloud-server/data",
-		"/opt/zcloud-server/certs",
+		dataDir,
+		certDir,
 	}
 
 	for _, dir := range dirs {
@@ -403,39 +407,51 @@ func initServer(configPath string) error {
 
 	// Crear config por defecto si no existe
 	if _, err := os.Stat(configPath); os.IsNotExist(err) {
-		defaultConfig := `# ZCloud Server Configuration
+		defaultConfig := fmt.Sprintf(`# zcloud-server configuration
 server:
   host: 0.0.0.0
-  port: 443
-  domain: api.zyrak.cloud
+  port: 8443
+  domain: localhost
 
 tls:
-  cert: /opt/zcloud-server/certs/fullchain.pem
-  key: /opt/zcloud-server/certs/privkey.pem
-  auto_renew: true
+  cert: %s/fullchain.pem
+  key: %s/privkey.pem
+  auto_renew: false
 
 auth:
-  jwt_secret_file: /opt/zcloud-server/data/jwt.secret
+  jwt_secret_file: %s/jwt.secret
   session_ttl: 12h
-  totp_issuer: "ZCloud"
+  totp_issuer: zcloud
   require_approval: true
 
 kubernetes:
-  kubeconfig: /etc/rancher/k3s/k3s.yaml
+  kubeconfig: /etc/kubernetes/admin.conf
   coredns_ip: 10.43.0.10:53
-  ca_cert: /var/lib/rancher/k3s/server/tls/server-ca.crt
+  ca_cert: ""
 
 storage:
-  database: /opt/zcloud-server/data/zcloud.db
-`
+  database: %s/zcloud.db
+  base_file_dir: %s/files
+`, certDir, certDir, dataDir, dataDir, baseDir)
 		if err := os.WriteFile(configPath, []byte(defaultConfig), 0600); err != nil {
 			return fmt.Errorf("failed to write config: %w", err)
 		}
 		fmt.Printf("✅ Configuration created at %s\n", configPath)
 	}
 
-	// Crear JWT secret
-	jwtSecretPath := "/opt/zcloud-server/data/jwt.secret"
+	config, err := loadConfig(configPath)
+	if err != nil {
+		return fmt.Errorf("failed to load configuration: %w", err)
+	}
+
+	// Create the JWT secret in the configured data directory.
+	jwtSecretPath := config.Auth.JWTSecretFile
+	if jwtSecretPath == "" {
+		jwtSecretPath = filepath.Join(dataDir, "jwt.secret")
+	}
+	if err := os.MkdirAll(filepath.Dir(jwtSecretPath), 0700); err != nil {
+		return fmt.Errorf("failed to create JWT secret directory: %w", err)
+	}
 	if _, err := os.Stat(jwtSecretPath); os.IsNotExist(err) {
 		secret, err := crypto.GenerateRandomSecret(32)
 		if err != nil {
@@ -447,8 +463,14 @@ storage:
 		fmt.Println("✅ JWT secret generated")
 	}
 
-	// Crear base de datos
-	dbPath := "/opt/zcloud-server/data/zcloud.db"
+	// Create the database in the configured storage directory.
+	dbPath := config.Storage.Database
+	if dbPath == "" {
+		dbPath = filepath.Join(dataDir, "zcloud.db")
+	}
+	if err := os.MkdirAll(filepath.Dir(dbPath), 0700); err != nil {
+		return fmt.Errorf("failed to create database directory: %w", err)
+	}
 	database, err := db.New(dbPath)
 	if err != nil {
 		return fmt.Errorf("failed to create database: %w", err)
@@ -458,9 +480,9 @@ storage:
 
 	fmt.Println()
 	fmt.Println("📋 Next steps:")
-	fmt.Println("   1. Edit the config: /opt/zcloud-server/config.yaml")
+	fmt.Printf("   1. Edit the config: %s\n", configPath)
 	fmt.Println("   2. Configure TLS certificates (Let's Encrypt):")
-	fmt.Println("      certbot certonly --standalone -d api.zyrak.cloud")
+	fmt.Printf("      certbot certonly --standalone -d %s\n", config.Server.Domain)
 	fmt.Println("   3. Enable the service:")
 	fmt.Println("      systemctl enable --now zcloud-server")
 	fmt.Println()
@@ -471,7 +493,7 @@ storage:
 // runAdminCommand handles direct database administration commands
 func runAdminCommand() {
 	// Usage:
-	//   zcloud-server admin devices <list|approve|revoke> [device_id] [--user name] [--config path]
+	//   zcloud-server admin devices <list|approve|revoke|make-admin> [device_id] [--user name] [--config path]
 	//   zcloud-server admin users <list|rotate> [user_name] [--device device_id] [--config path]
 	if len(os.Args) < 3 {
 		printAdminUsage()
@@ -537,6 +559,13 @@ func runAdminCommand() {
 				os.Exit(1)
 			}
 			adminRevokeDevice(database, os.Args[4])
+		case "make-admin":
+			if len(os.Args) < 5 {
+				fmt.Fprintln(os.Stderr, "Error: device_id required")
+				fmt.Fprintln(os.Stderr, "Usage: zcloud-server admin devices make-admin <device_id>")
+				os.Exit(1)
+			}
+			adminMakeDeviceAdmin(database, os.Args[4])
 		default:
 			fmt.Fprintf(os.Stderr, "Unknown action: %s\n", action)
 			printAdminUsage()
@@ -591,6 +620,7 @@ func printAdminUsage() {
 	fmt.Println("  list              List all registered devices")
 	fmt.Println("  approve <id>      Approve a pending device (optional: --user <name>)")
 	fmt.Println("  revoke <id>       Revoke a device")
+	fmt.Println("  make-admin <id>   Grant administrator access to a device")
 	fmt.Println("  users list        List users/personas")
 	fmt.Println("  users rotate      Rotate user's TOTP secret and emit enrollment code (requires --device)")
 	fmt.Println()
@@ -809,6 +839,19 @@ func adminRevokeDevice(database *db.Database, deviceID string) {
 	fmt.Printf("✅ Device revoked: %s (%s)\n", device.Name, shortPrefix(device.ID, 12))
 }
 
+func adminMakeDeviceAdmin(database *db.Database, deviceID string) {
+	device, err := findDevice(database, deviceID)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+	if err := database.SetAdmin(device.ID, true); err != nil {
+		fmt.Fprintf(os.Stderr, "Error granting administrator access: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Printf("Device %s (%s) is now an administrator\n", device.Name, shortPrefix(device.ID, 12))
+}
+
 func findDevice(database *db.Database, partialID string) (*protocol.DeviceInfo, error) {
 	devices, err := database.ListDevices()
 	if err != nil {
@@ -848,4 +891,3 @@ func shortPrefix(s string, n int) string {
 	}
 	return s[:n]
 }
-

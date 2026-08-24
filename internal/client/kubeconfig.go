@@ -10,7 +10,7 @@ import (
 )
 
 // DefaultClusterName is the fallback cluster name when none is configured.
-const DefaultClusterName = "zcloud-homelab"
+const DefaultClusterName = "zcloud-cluster"
 
 // KubeConfig estructura del kubeconfig
 type KubeConfig struct {
@@ -31,9 +31,9 @@ type KubeCluster struct {
 
 // ClusterEntry datos del cluster
 type ClusterEntry struct {
-	Server                string `yaml:"server"`
+	Server                   string `yaml:"server"`
 	CertificateAuthorityData string `yaml:"certificate-authority-data,omitempty"`
-	InsecureSkipTLSVerify bool   `yaml:"insecure-skip-tls-verify,omitempty"`
+	InsecureSkipTLSVerify    bool   `yaml:"insecure-skip-tls-verify,omitempty"`
 }
 
 // KubeContext representa un contexto en kubeconfig

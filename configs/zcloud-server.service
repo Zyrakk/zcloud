@@ -1,7 +1,7 @@
 [Unit]
-Description=ZCloud Server - Remote K3s Management
+Description=zcloud-server - Remote Kubernetes Management
 Documentation=https://github.com/zyrak/zcloud
-After=network.target k3s.service
+After=network.target
 Wants=network-online.target
 
 [Service]
@@ -19,7 +19,7 @@ SyslogIdentifier=zcloud-server
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/opt/zcloud-server/data
+ReadWritePaths=/opt/zcloud-server/data /opt/zcloud-server/files
 PrivateTmp=true
 
 # Environment

@@ -20,7 +20,7 @@ type Config struct {
 
 // ServerConfig configuración del servidor
 type ServerConfig struct {
-	URL      string `yaml:"url"`      // https://api.zyrak.cloud
+	URL      string `yaml:"url"`      // URL of the zcloud-server instance
 	Insecure bool   `yaml:"insecure"` // Para desarrollo (skip TLS verify)
 }
 
@@ -41,7 +41,7 @@ type SessionConfig struct {
 
 // ClusterConfig configuración del cluster
 type ClusterConfig struct {
-	Name    string `yaml:"name"`    // Nombre para mostrar: "zcloud-homelab"
+	Name    string `yaml:"name"`    // Name shown to the user
 	Context string `yaml:"context"` // Nombre del contexto: "zcloud"
 }
 

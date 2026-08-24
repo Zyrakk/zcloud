@@ -20,7 +20,7 @@ import (
 
 const (
 	// defaultBaseFileDir is the fallback directory for file operations when not configured.
-	defaultBaseFileDir = "/home/zcloud/files"
+	defaultBaseFileDir = "/var/lib/zcloud/files"
 	// MaxUploadSize tamaño máximo de subida (100MB)
 	MaxUploadSize = 100 << 20
 )

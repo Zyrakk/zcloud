@@ -30,11 +30,11 @@ jobs:
         working-directory: dist
         run: sha256sum zcloud-linux-amd64 zcloud-linux-arm64 zcloud-server-linux-amd64 zcloud-server-linux-arm64 > checksums-sha256.txt
 
-      - name: Create draft release
+      - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
-          draft: true
           name: ZCloud ${{ github.ref_name }}
+          generate_release_notes: true
           files: |
             dist/zcloud-linux-amd64
             dist/zcloud-linux-arm64

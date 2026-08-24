@@ -43,12 +43,12 @@ func shortPrefix(s string, n int) string {
 func main() {
 	rootCmd := &cobra.Command{
 		Use:   "zcloud",
-		Short: "ZCloud CLI - Remote k3s cluster management",
-		Long: `ZCloud CLI lets you connect to and manage your k3s cluster securely
+		Short: "zcloud CLI - Remote Kubernetes management",
+		Long: `zcloud CLI lets you connect to and manage your Kubernetes cluster securely
 from anywhere.
 
 Examples:
-  zcloud init https://api.zyrak.cloud    # Initial setup
+  zcloud init https://your-zcloud-server.example.com  # Initial setup
   zcloud login                           # Login
   zcloud status                          # Cluster/session status
   zcloud k get pods -A                   # Run kubectl via proxy
@@ -104,7 +104,7 @@ func initCmd() *cobra.Command {
 Generates device keys and registers the device with the server.
 
 Example:
-  zcloud init https://api.zyrak.cloud`,
+  zcloud init https://your-zcloud-server.example.com`,
 		Args: cobra.MaximumNArgs(1),
 		Run: func(cmd *cobra.Command, args []string) {
 			if complete && reset {
@@ -173,7 +173,7 @@ Example:
 
 			if len(args) == 0 {
 				fmt.Fprintln(os.Stderr, "Error: server URL is required")
-				fmt.Fprintln(os.Stderr, "Usage: zcloud init https://api.zyrak.cloud")
+				fmt.Fprintln(os.Stderr, "Usage: zcloud init https://your-zcloud-server.example.com")
 				os.Exit(1)
 			}
 
